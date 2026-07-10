@@ -97,20 +97,26 @@ leave it as-is, or change it to anything you like as long as:
    (or select every question for a "Full SAFE Assessment").
 6. Head to **Take Assessment** to try it end-to-end.
 
-## Known limitations in this first version
+## Known limitations in this version
 
-- **Pathway Link**: the PDF export didn't retain the actual hyperlink
-  URLs behind these (only the "Pathway Link" label text), so they show
-  as plain text by default. You can attach a real URL to any question
-  by editing it in Settings — the link will then become clickable.
-- **Editing nested sub-questions**: about 219 of the ~315 parsed
-  questions are sub-items nested under a parent (like `SDC.410.a` under
-  `SDC.410`). You can edit or add top-level/standalone questions from
-  the Settings UI, but editing an existing sub-question's text
-  currently requires editing it directly in the Firestore Console
-  (Firestore Database -> Data -> `questions` -> the parent document's
-  `children` array). Happy to add a proper in-app editor for this next
-  if it'd be useful.
+- **Slack integration is simulated.** The Review & Submit screen plays a
+  "sending to Slack" animation and logs the exact payload it *would*
+  send to your browser console (open DevTools → Console to see it) —
+  but it doesn't actually call Slack yet, on purpose, so you can try
+  the flow first. When you're ready to wire up the real thing:
+  1. Create a Slack Incoming Webhook (Slack → your workspace → Apps →
+     search "Incoming Webhooks" → add one → pick a channel → copy the
+     Webhook URL).
+  2. In `app.js`, find `runSlackSendSequence` and replace the
+     `console.log('[Slack webhook simulation]...` line with an actual
+     `fetch(webhookUrl, { method: 'POST', body: JSON.stringify(payload) })`.
+  3. **Security note:** calling a webhook straight from client-side JS
+     means the URL is visible to anyone who views your site's source —
+     anyone could find it and post fake messages into your channel.
+     For a public site, it's worth routing that call through something
+     that can keep the URL private, like a small Firebase Cloud
+     Function or Zapier webhook. Happy to help set that up when you get
+     there.
 - **Attachments**: the source tool supports photo attachments per
   question; this version supports notes but not photo uploads yet
   (would use Firebase Storage — a quick addition if you want it).
