@@ -38,7 +38,9 @@ const state = {
   editingTemplate: null,   // 'new' | template | null
   editingLocation: null,   // 'new' | location | null
   selectedLocationId: null,
-  selectedLocationName: null
+  selectedLocationName: null,
+  takeStage: 'filling',          // 'filling' | 'review'
+  takeValidationAttempted: false
 };
 
 /* =========================================================================
@@ -63,22 +65,22 @@ function isFailOption(opt) { return /^No\b/.test(opt || ''); }
 function isExcludedOption(opt) { return /^Not\s+(Observable|Applicable)/i.test(opt || ''); }
 
 function flattenAnswerable(question) {
-  // returns array of {code, text, guidance, pathwayLink, options, severity, category, isChild, parentCode, parentText}
+  // returns array of {code, text, guidance, links, options, severity, category, isChild, parentCode, parentText}
   const out = [];
   if (question.children && question.children.length) {
     question.children.forEach(c => {
       out.push({
-        code: c.id, text: c.text, guidance: c.guidance, pathwayLink: c.pathwayLink,
+        code: c.id, text: c.text, guidance: c.guidance, links: c.links || [],
         options: c.options || [], severity: question.severity, category: question.category,
         isChild: true, parentCode: question.id, parentText: question.text,
-        parentGuidance: question.guidance, parentPathwayLink: question.pathwayLink, parentPathwayUrl: question.pathwayUrl
+        parentGuidance: question.guidance, parentLinks: question.links || []
       });
     });
   } else {
     out.push({
-      code: question.id, text: question.text, guidance: question.guidance, pathwayLink: question.pathwayLink,
+      code: question.id, text: question.text, guidance: question.guidance, links: question.links || [],
       options: question.options || [], severity: question.severity, category: question.category,
-      isChild: false, parentCode: null, parentText: null
+      isChild: false, parentCode: null, parentText: null, parentLinks: []
     });
   }
   return out;
@@ -104,6 +106,18 @@ function gradeColorVar(grade) {
   if (grade === 'A' || grade === 'B') return 'var(--safe)';
   if (grade === 'C') return 'var(--medium)';
   return 'var(--danger)';
+}
+
+function sanitizeForFirestore(value) {
+  if (Array.isArray(value)) return value.map(sanitizeForFirestore);
+  if (value && typeof value === 'object') {
+    const out = {};
+    Object.keys(value).forEach(k => {
+      out[k] = value[k] === undefined ? null : sanitizeForFirestore(value[k]);
+    });
+    return out;
+  }
+  return value;
 }
 
 function toCSV(rows) {
@@ -223,7 +237,7 @@ async function seedQuestionBank() {
 }
 
 async function saveQuestionToDb(q) {
-  await setDoc(doc(db, 'questions', q.id), q);
+  await setDoc(doc(db, 'questions', q.id), sanitizeForFirestore(q));
 }
 async function deleteQuestionFromDb(id) {
   await deleteDoc(doc(db, 'questions', id));
@@ -236,9 +250,9 @@ async function deleteQuestionFromDb(id) {
 async function saveTemplateToDb(t) {
   if (t.id) {
     const { id, ...rest } = t;
-    await setDoc(doc(db, 'templates', id), rest, { merge: true });
+    await setDoc(doc(db, 'templates', id), sanitizeForFirestore(rest), { merge: true });
   } else {
-    await addDoc(collection(db, 'templates'), { name: t.name, description: t.description, questionIds: t.questionIds, createdAt: new Date().toISOString() });
+    await addDoc(collection(db, 'templates'), sanitizeForFirestore({ name: t.name, description: t.description, frequency: t.frequency, questionIds: t.questionIds, createdAt: new Date().toISOString() }));
   }
 }
 async function deleteTemplateFromDb(id) { await deleteDoc(doc(db, 'templates', id)); }
@@ -246,9 +260,9 @@ async function deleteTemplateFromDb(id) { await deleteDoc(doc(db, 'templates', i
 async function saveLocationToDb(loc) {
   if (loc.id) {
     const { id, ...rest } = loc;
-    await setDoc(doc(db, 'locations', id), rest, { merge: true });
+    await setDoc(doc(db, 'locations', id), sanitizeForFirestore(rest), { merge: true });
   } else {
-    await addDoc(collection(db, 'locations'), { name: loc.name, createdAt: new Date().toISOString() });
+    await addDoc(collection(db, 'locations'), sanitizeForFirestore({ name: loc.name, createdAt: new Date().toISOString() }));
   }
 }
 async function deleteLocationFromDb(id) { await deleteDoc(doc(db, 'locations', id)); }
@@ -351,10 +365,17 @@ function goToView(view) {
 function badgeHTML(severity) {
   return `<span class="badge badge-${severity}">${esc(severity)}</span>`;
 }
-function pathwayHTML(pathwayLink, pathwayUrl) {
-  if (pathwayUrl) return `<a class="q-pathway" href="${esc(pathwayUrl)}" target="_blank" rel="noopener">Pathway Link</a>`;
-  if (pathwayLink) return `<span class="q-pathway" title="No link saved yet — add one by editing this question in Settings">Pathway Link</span>`;
-  return '';
+function linksHTML(links) {
+  if (!links || !links.length) return '';
+  const real = links.filter(l => l && l.url && l.url.trim());
+  if (!real.length) return '';
+  return real.map(l => `<a class="q-pathway" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || 'Link')}</a>`).join(' ');
+}
+function isItemComplete(r) {
+  if (!r.options || r.options.length === 0) return true;
+  if (r.answer == null) return false;
+  if (isFailOption(r.answer) && !(r.notes && r.notes.trim())) return false;
+  return true;
 }
 function stampHTML(grade, percent, size) {
   size = size || 90;
@@ -461,7 +482,9 @@ function renderDashboard() {
 ========================================================================= */
 
 function renderTake() {
-  if (state.draftRun) return renderTakeInProgress();
+  if (state.draftRun) {
+    return state.takeStage === 'review' ? renderTakeReview() : renderTakeInProgress();
+  }
 
   const drafts = loadLocalDrafts();
 
@@ -490,7 +513,7 @@ function renderTake() {
           <div class="template-card clickable" data-action="start-run" data-id="${t.id}">
             <h3>${esc(t.name)}</h3>
             <p>${esc(t.description || '')}</p>
-            <div class="template-meta">${(t.questionIds || []).length} questions</div>
+            <div class="template-meta">${(t.questionIds || []).length} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
           </div>
         `).join('')}
       </div>
@@ -500,9 +523,10 @@ function renderTake() {
 
 function renderTakeInProgress() {
   const run = state.draftRun;
-  const answered = run.responses.filter(r => r.options.length === 0 || r.answer != null).length;
+  const answered = run.responses.filter(isItemComplete).length;
   const total = run.responses.length;
   const pct = total ? Math.round((answered / total) * 100) : 0;
+  const incompleteCount = total - answered;
 
   const byCategory = {};
   run.responses.forEach(r => { (byCategory[r.category] = byCategory[r.category] || []).push(r); });
@@ -527,7 +551,13 @@ function renderTakeInProgress() {
     </div>
 
     <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:${pct}%"></div></div>
-    <div class="progress-label" id="progressLabel">${answered} of ${total} answered</div>
+    <div class="progress-label" id="progressLabel">${answered} of ${total} complete</div>
+
+    ${state.takeValidationAttempted && incompleteCount > 0 ? `
+      <div class="callout callout-danger" id="submitWarning">
+        <span>&#9888;</span> ${incompleteCount} question${incompleteCount > 1 ? 's' : ''} still need${incompleteCount > 1 ? '' : 's'} attention &mdash; highlighted below.
+      </div>
+    ` : ''}
 
     ${Object.keys(byCategory).map(cat => `
       <section class="panel">
@@ -538,10 +568,108 @@ function renderTakeInProgress() {
 
     <div class="sticky-footer">
       <button class="btn btn-ghost" data-action="save-draft">Save draft</button>
-      <button class="btn btn-primary" id="submitBtn" ${answered === total && total > 0 ? '' : 'disabled'} data-action="submit-run">Submit assessment</button>
+      <button class="btn btn-primary" id="submitBtn" data-action="submit-run">Submit assessment</button>
     </div>
-    <div class="hint">Answer every item to submit &mdash; you can save a draft any time.</div>
+    <div class="hint">Answer every item to submit &mdash; "No" answers need a note. You can save a draft any time.</div>
   `;
+}
+
+function renderTakeReview() {
+  const run = state.draftRun;
+  const score = computeScore(run.responses);
+  const failed = run.responses.filter(r => isFailOption(r.answer));
+
+  return `
+    ${pageHeaderHTML(run.templateName, 'Review & submit',
+      `<button class="btn btn-ghost" data-action="back-to-filling">Back to assessment</button>`)}
+
+    <div class="panel report-summary">
+      ${stampHTML(score.grade, score.percent, 90)}
+      <div class="report-meta">
+        <div>${esc(run.assessorName || 'Unnamed')}</div>
+        <div>${esc(run.locationName || 'No location')}</div>
+        <div>${fmtDate(run.date)}</div>
+        <div class="score-breakdown">${score.pass} passed &middot; ${score.fail} failed &middot; ${score.excluded} excluded${score.criticalFails > 0 ? ' &middot; ' + score.criticalFails + ' IMMEDIATE failure' + (score.criticalFails > 1 ? 's' : '') : ''}</div>
+      </div>
+    </div>
+
+    ${failed.length === 0 ? `
+      <div class="panel"><h3>Nothing missed &mdash; nice work.</h3><p style="color:var(--ink-soft);font-size:.88rem;margin:0;">Every item passed. You can still add a general note below before sending, or just confirm and submit.</p></div>
+    ` : `
+      <section class="panel">
+        <h3>Missed questions (${failed.length}) &mdash; review notes before sending</h3>
+        <ul class="q-list">
+          ${failed.map(r => `
+            <li class="q-row">
+              <div class="q-main" style="width:100%;">
+                <div class="q-card-badge-row">${badgeHTML(r.severity)} <span class="q-code">${esc(r.code)}</span></div>
+                <div class="q-text">${esc(r.text)}</div>
+                <textarea class="review-note-textarea" data-code="${esc(r.code)}" rows="2" placeholder="Corrective action or notes&hellip;">${esc(r.notes || '')}</textarea>
+              </div>
+            </li>
+          `).join('')}
+        </ul>
+      </section>
+    `}
+
+    <div class="sticky-footer">
+      <button class="btn btn-ghost" data-action="back-to-filling">Back to assessment</button>
+      <button class="btn btn-primary" data-action="confirm-send-slack">Confirm &amp; send to Slack</button>
+    </div>
+    <div class="hint">This sends a summary of missed questions to Slack, then submits the assessment.</div>
+  `;
+}
+
+function buildSlackPayload(run, score) {
+  const failed = run.responses.filter(r => isFailOption(r.answer));
+  const lines = failed.map(r => '\u2022 [' + r.severity + '] ' + r.code + ': ' + r.text + (r.notes ? '\n   note: ' + r.notes : ''));
+  return {
+    text:
+      'SAFE Assessment submitted \u2014 ' + (run.locationName || 'Unknown location') + '\n' +
+      'Template: ' + run.templateName + '\n' +
+      'Assessor: ' + (run.assessorName || 'Unnamed') + '\n' +
+      'Date: ' + run.date + '\n' +
+      'Score: ' + score.grade + ' (' + score.percent + '%)' + (score.criticalFails ? ' \u2014 ' + score.criticalFails + ' IMMEDIATE failure(s)' : '') + '\n\n' +
+      (failed.length ? 'Missed questions (' + failed.length + '):\n' + lines.join('\n') : 'No missed questions \u2014 great job!')
+  };
+}
+
+function runSlackSendSequence(payload, onDone) {
+  // NOTE: this is simulated on purpose (per request, to validate the flow
+  // before wiring a real webhook). Swap the setTimeout stages below for an
+  // actual fetch() to your Slack Incoming Webhook URL when ready — see
+  // SETUP.md for the security caveat about calling webhooks from the client.
+  console.log('[Slack webhook simulation] Would send:', payload);
+  state.showingSlackAnim = true;
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `
+    <div class="modal-overlay">
+      <div class="modal slack-send-modal">
+        <div class="modal-body slack-anim">
+          <div class="slack-icon-wrap" id="slackIconWrap">
+            <div class="slack-icon-pulse"></div>
+            <div class="slack-icon">&#128172;</div>
+          </div>
+          <div class="slack-status" id="slackStatus">Preparing summary&hellip;</div>
+        </div>
+      </div>
+    </div>
+  `;
+  setTimeout(() => {
+    const s = document.getElementById('slackStatus');
+    if (s) s.textContent = 'Sending to Slack\u2026';
+  }, 650);
+  setTimeout(() => {
+    const wrap = document.getElementById('slackIconWrap');
+    const s = document.getElementById('slackStatus');
+    if (wrap) wrap.classList.add('done');
+    if (s) s.innerHTML = 'Sent <span class="pill-outline">simulated \u2014 no webhook connected yet</span>';
+  }, 1500);
+  setTimeout(() => {
+    document.getElementById('modalRoot').innerHTML = '';
+    state.showingSlackAnim = false;
+    onDone();
+  }, 2300);
 }
 
 function groupByParent(items) {
@@ -552,7 +680,7 @@ function groupByParent(items) {
     if (!map[key]) {
       map[key] = {
         parentCode: it.parentCode, parentText: it.parentText,
-        parentGuidance: it.parentGuidance, parentPathwayLink: it.parentPathwayLink, parentPathwayUrl: it.parentPathwayUrl,
+        parentGuidance: it.parentGuidance, parentLinks: it.parentLinks || [],
         items: []
       };
       groups.push(map[key]);
@@ -565,12 +693,13 @@ function groupByParent(items) {
 function renderTakeGroup(g) {
   const isGroup = !!g.parentCode;
   const first = g.items[0];
+  const anyIncomplete = state.takeValidationAttempted && g.items.some(it => !isItemComplete(it));
   return `
-    <details class="q-card sev-${first.severity}">
+    <details class="q-card sev-${first.severity}" ${anyIncomplete ? 'open' : ''}>
       <summary class="q-card-head">
         <div class="q-card-main">
           <div class="q-card-badge-row">${badgeHTML(first.severity)} <span class="q-code">${esc(isGroup ? g.parentCode : first.code)}</span></div>
-          <div class="q-text">${esc(isGroup ? g.parentText : first.text)} ${pathwayHTML(isGroup ? g.parentPathwayLink : first.pathwayLink, isGroup ? g.parentPathwayUrl : first.pathwayUrl)}</div>
+          <div class="q-text">${esc(isGroup ? g.parentText : first.text)} ${linksHTML(isGroup ? g.parentLinks : first.links)}</div>
           ${isGroup && g.parentGuidance ? `<div class="q-guidance">${esc(g.parentGuidance)}</div>` : ''}
         </div>
         <span class="chev">&#9662;</span>
@@ -584,9 +713,12 @@ function renderTakeGroup(g) {
 
 function renderTakeItem(it) {
   const hasOptions = it.options && it.options.length > 0;
+  const complete = isItemComplete(it);
+  const missing = state.takeValidationAttempted && !complete;
+  const needsNote = isFailOption(it.answer) && !(it.notes && it.notes.trim());
   return `
-    <div class="child-item" data-code="${esc(it.code)}">
-      ${it.isChild ? `<div class="q-text">${esc(it.text)} ${pathwayHTML(it.pathwayLink, it.pathwayUrl)}</div>` : ''}
+    <div class="child-item ${it.answer != null ? 'answered' : ''} ${missing ? 'missing' : ''}" data-code="${esc(it.code)}">
+      ${it.isChild ? `<div class="q-text">${esc(it.text)} ${linksHTML(it.links)}</div>` : ''}
       ${it.guidance ? `<div class="q-guidance">${esc(it.guidance)}</div>` : ''}
       ${hasOptions ? `
         <div class="option-group" data-code="${esc(it.code)}">
@@ -595,12 +727,17 @@ function renderTakeItem(it) {
             const active = it.answer === opt ? ' active' : '';
             return `<button type="button" class="opt-btn ${cls}${active}" data-action="answer" data-code="${esc(it.code)}" data-option="${esc(opt)}">${esc(opt)}</button>`;
           }).join('')}
+          ${it.answer != null ? '<span class="answered-check" title="Answered">&#10003;</span>' : ''}
         </div>
       ` : `<div class="hint">No pass/fail options for this item &mdash; use notes to record what you observed.</div>`}
-      <button type="button" class="notes-toggle" data-action="toggle-notes" data-code="${esc(it.code)}">+ Add notes</button>
-      <div class="notes-input" id="notes-wrap-${esc(it.code)}" style="display:${it.notes ? 'block' : 'none'}">
+      <div class="notes-row">
+        <button type="button" class="notes-toggle" data-action="toggle-notes" data-code="${esc(it.code)}">+ Add notes</button>
+        <span class="note-required-flag" id="note-required-${esc(it.code)}" style="display:${needsNote ? 'inline' : 'none'}">Note required for a "No" answer</span>
+      </div>
+      <div class="notes-input" id="notes-wrap-${esc(it.code)}" style="display:${(it.notes || needsNote) ? 'block' : 'none'}">
         <textarea rows="2" placeholder="Observations or corrective action&hellip;" data-code="${esc(it.code)}" class="notes-textarea">${esc(it.notes || '')}</textarea>
       </div>
+      ${missing ? `<div class="missing-flag">${it.answer == null ? 'This question still needs an answer.' : 'Add a note to explain this "No" before submitting.'}</div>` : ''}
     </div>
   `;
 }
@@ -611,16 +748,31 @@ function findResponse(code) {
 
 function updateProgressUI() {
   const run = state.draftRun;
-  const answered = run.responses.filter(r => r.options.length === 0 || r.answer != null).length;
+  const answered = run.responses.filter(isItemComplete).length;
   const total = run.responses.length;
   const pct = total ? Math.round((answered / total) * 100) : 0;
   const fill = document.getElementById('progressFill');
   const label = document.getElementById('progressLabel');
-  const submitBtn = document.getElementById('submitBtn');
   if (fill) fill.style.width = pct + '%';
-  if (label) label.textContent = answered + ' of ' + total + ' answered';
-  if (submitBtn) submitBtn.disabled = !(answered === total && total > 0);
+  if (label) label.textContent = answered + ' of ' + total + ' complete';
 }
+
+function refreshItemState(code) {
+  const r = findResponse(code);
+  if (!r) return;
+  const item = document.querySelector('.child-item[data-code="' + cssId(code) + '"]');
+  const flag = document.getElementById('note-required-' + code);
+  const needsNote = isFailOption(r.answer) && !(r.notes && r.notes.trim());
+  if (flag) flag.style.display = needsNote ? 'inline' : 'none';
+  if (item) {
+    item.classList.toggle('answered', r.answer != null);
+    if (state.takeValidationAttempted) {
+      item.classList.toggle('missing', !isItemComplete(r));
+    }
+  }
+  updateProgressUI();
+}
+function cssId(s) { return String(s).replace(/"/g, '\\"'); }
 
 /* =========================================================================
    SETTINGS: LIBRARY / TEMPLATES / LOCATIONS
@@ -739,7 +891,7 @@ function renderTemplatesTab() {
           <div class="template-card">
             <h3>${esc(t.name)}</h3>
             <p>${esc(t.description || '')}</p>
-            <div class="template-meta">${(t.questionIds || []).length} questions</div>
+            <div class="template-meta">${(t.questionIds || []).length} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
             <div class="template-actions">
               <button class="btn btn-ghost btn-sm" data-action="edit-template" data-id="${esc(t.id)}">Edit</button>
               <button class="btn btn-ghost btn-sm" data-action="delete-template" data-id="${esc(t.id)}">Delete</button>
@@ -752,8 +904,9 @@ function renderTemplatesTab() {
 }
 
 function renderTemplateEditor() {
-  const t = state.editingTemplate === 'new' ? { name: '', description: '', questionIds: [] } : state.editingTemplate;
+  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [] } : state.editingTemplate;
   window.__templateSelection = new Set(t.questionIds || []);
+  const frequencies = ['Daily', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'As Needed'];
 
   return `
     <div class="panel">
@@ -761,6 +914,10 @@ function renderTemplateEditor() {
       <input id="tplName" value="${esc(t.name)}" placeholder="e.g. Full SAFE Assessment" />
       <label class="field-label">Description</label>
       <textarea id="tplDesc" rows="2" placeholder="When and why this gets used.">${esc(t.description || '')}</textarea>
+      <label class="field-label">How often should this be performed?</label>
+      <select id="tplFrequency">
+        ${frequencies.map(f => `<option value="${f}" ${(t.frequency || 'Daily') === f ? 'selected' : ''}>${f}</option>`).join('')}
+      </select>
     </div>
     <div class="filter-bar">
       <div class="search-box"><input id="tplSearch" placeholder="Search questions&hellip;" oninput="window.__tplFilter()" /></div>
@@ -768,9 +925,16 @@ function renderTemplateEditor() {
         <option value="all">All categories</option>
         ${state.categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
       </select>
+      <select id="tplSevFilter" onchange="window.__tplFilter()">
+        <option value="all">All severities</option>
+        <option value="IMMEDIATE">Immediate</option>
+        <option value="HIGH">High</option>
+        <option value="MEDIUM">Medium</option>
+        <option value="LOW">Low</option>
+      </select>
       <div class="pill-outline" id="tplSelCount">${window.__templateSelection.size} selected</div>
     </div>
-    <div id="tplListContainer">${buildTemplateSelectHTML('', 'all')}</div>
+    <div id="tplListContainer">${buildTemplateSelectHTML('', 'all', 'all')}</div>
     <div class="sticky-footer">
       <button class="btn btn-ghost" data-action="cancel-template-edit">Cancel</button>
       <button class="btn btn-primary" data-action="save-template" data-id="${t.id || ''}">Save template</button>
@@ -778,10 +942,11 @@ function renderTemplateEditor() {
   `;
 }
 
-function buildTemplateSelectHTML(search, catFilter) {
+function buildTemplateSelectHTML(search, catFilter, sevFilter) {
   const s = (search || '').toLowerCase();
   const filtered = state.questions.filter(q => {
     if (catFilter !== 'all' && q.category !== catFilter) return false;
+    if (sevFilter && sevFilter !== 'all' && q.severity !== sevFilter) return false;
     if (s && !q.text.toLowerCase().includes(s)) return false;
     return true;
   });
@@ -816,7 +981,8 @@ function buildTemplateSelectHTML(search, catFilter) {
 window.__tplFilter = function () {
   const search = document.getElementById('tplSearch').value;
   const cat = document.getElementById('tplCatFilter').value;
-  document.getElementById('tplListContainer').innerHTML = buildTemplateSelectHTML(search, cat);
+  const sev = document.getElementById('tplSevFilter') ? document.getElementById('tplSevFilter').value : 'all';
+  document.getElementById('tplListContainer').innerHTML = buildTemplateSelectHTML(search, cat, sev);
   document.getElementById('tplSelCount').textContent = window.__templateSelection.size + ' selected';
 };
 
@@ -982,6 +1148,7 @@ function renderRunDetail() {
 ========================================================================= */
 
 function renderModal() {
+  if (state.showingSlackAnim) return;
   const root = document.getElementById('modalRoot');
   if (state.showPasswordModal) {
     root.innerHTML = `
@@ -1008,15 +1175,108 @@ function renderModal() {
   root.innerHTML = '';
 }
 
+let qDraft = null;
+
+function startQuestionEdit(question) {
+  if (question === 'new' || question == null) {
+    qDraft = { id: '', category: state.categories[0] || '', severity: 'MEDIUM', text: '', guidance: '', options: ['Yes', 'No'], links: [], children: [] };
+  } else {
+    qDraft = JSON.parse(JSON.stringify(question));
+    if (!qDraft.links) qDraft.links = [];
+    if (!qDraft.children) qDraft.children = [];
+    qDraft.children.forEach(c => { if (!c.links) c.links = []; });
+  }
+}
+
+function linksEditorHTML(links, scope) {
+  return `
+    <div class="links-editor" data-scope="${scope}">
+      ${(links || []).map((l, i) => `
+        <div class="link-row">
+          <input class="link-label" placeholder="Link name (e.g. SOP)" value="${esc(l.label || '')}" />
+          <input class="link-url" placeholder="https://&hellip;" value="${esc(l.url || '')}" />
+          <button type="button" class="icon-btn" data-action="remove-link" data-scope="${scope}" data-index="${i}">&times;</button>
+        </div>
+      `).join('')}
+      <button type="button" class="btn btn-ghost btn-sm" data-action="add-link" data-scope="${scope}">+ Add link</button>
+    </div>
+  `;
+}
+
+function childEditorHTML(child, idx) {
+  return `
+    <div class="child-editor-row" data-child-index="${idx}">
+      <div class="child-editor-head">
+        <span class="pill-outline">${esc(child.id || 'new sub-question')}</span>
+        <button type="button" class="icon-btn" data-action="remove-child" data-index="${idx}">&times;</button>
+      </div>
+      <label class="field-label">Sub-question code</label>
+      <input class="child-id" value="${esc(child.id || '')}" placeholder="e.g. SDC.999.a" />
+      <label class="field-label">Text</label>
+      <textarea class="child-text" rows="2">${esc(child.text || '')}</textarea>
+      <label class="field-label">Guidance (optional)</label>
+      <textarea class="child-guidance" rows="2">${esc(child.guidance || '')}</textarea>
+      <label class="field-label">Answer options (comma-separated, blank = notes only)</label>
+      <input class="child-options" value="${esc((child.options || []).join(', '))}" placeholder="Yes, No, Not Observable" />
+      <label class="field-label">Links</label>
+      ${linksEditorHTML(child.links, 'child-' + idx)}
+    </div>
+  `;
+}
+
+function syncQuestionDraftFromDom() {
+  if (!qDraft) return;
+  const catEl = document.getElementById('qCategory');
+  const sevEl = document.getElementById('qSeverity');
+  const textEl = document.getElementById('qText');
+  const guidanceEl = document.getElementById('qGuidance');
+  const optsEl = document.getElementById('qOptions');
+  const idEl = document.getElementById('qId');
+  if (idEl) qDraft.id = idEl.value.trim();
+  if (catEl) qDraft.category = catEl.value;
+  if (sevEl) qDraft.severity = sevEl.value;
+  if (textEl) qDraft.text = textEl.value;
+  if (guidanceEl) qDraft.guidance = guidanceEl.value;
+  if (optsEl) qDraft.options = optsEl.value.split(',').map(s => s.trim()).filter(Boolean);
+
+  qDraft.links = readLinksEditor('parent');
+
+  document.querySelectorAll('.child-editor-row').forEach(row => {
+    const idx = parseInt(row.getAttribute('data-child-index'), 10);
+    const c = qDraft.children[idx];
+    if (!c) return;
+    c.id = row.querySelector('.child-id').value.trim();
+    c.text = row.querySelector('.child-text').value;
+    c.guidance = row.querySelector('.child-guidance').value;
+    c.options = row.querySelector('.child-options').value.split(',').map(s => s.trim()).filter(Boolean);
+    c.links = readLinksEditor('child-' + idx);
+  });
+}
+
+function readLinksEditor(scope) {
+  const container = document.querySelector('.links-editor[data-scope="' + scope + '"]');
+  if (!container) return [];
+  const rows = container.querySelectorAll('.link-row');
+  const links = [];
+  rows.forEach(row => {
+    const label = row.querySelector('.link-label').value.trim();
+    const url = row.querySelector('.link-url').value.trim();
+    if (label || url) links.push({ label, url });
+  });
+  return links;
+}
+
+
 function questionModalHTML() {
   const isNew = state.editingQuestion === 'new';
-  const q = isNew ? { id: '', category: state.categories[0] || '', severity: 'MEDIUM', text: '', guidance: '', pathwayLink: false, pathwayUrl: '', options: ['Yes', 'No'] } : state.editingQuestion;
+  const q = qDraft;
   return `
     <div class="modal-overlay" data-action="close-modal-overlay">
-      <div class="modal">
+      <div class="modal question-modal">
         <div class="modal-header"><h3>${isNew ? 'Add a question' : 'Edit question'}</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
         <div class="modal-body">
-          ${isNew ? `<label class="field-label">Question code</label><input id="qId" placeholder="e.g. SDC.999" />` : `<input type="hidden" id="qId" value="${esc(q.id)}" />`}
+          <label class="field-label">Question code</label>
+          <input id="qId" value="${esc(q.id)}" placeholder="e.g. SDC.999" ${isNew ? '' : 'readonly'} />
           <label class="field-label">Category</label>
           <select id="qCategory">
             ${state.categories.map(c => `<option value="${esc(c)}" ${q.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
@@ -1029,10 +1289,17 @@ function questionModalHTML() {
           <textarea id="qText" rows="2">${esc(q.text)}</textarea>
           <label class="field-label">Guidance (optional)</label>
           <textarea id="qGuidance" rows="2">${esc(q.guidance || '')}</textarea>
-          <label class="field-label">Answer options (comma-separated)</label>
+          <label class="field-label">Answer options (comma-separated)${q.children && q.children.length ? ' &mdash; ignored while this question has sub-questions below' : ''}</label>
           <input id="qOptions" value="${esc((q.options || []).join(', '))}" placeholder="Yes, No, Not Observable" />
-          <label class="field-label">Pathway link URL (optional)</label>
-          <input id="qPathwayUrl" value="${esc(q.pathwayUrl || '')}" placeholder="https://&hellip;" />
+          <label class="field-label">Links</label>
+          ${linksEditorHTML(q.links, 'parent')}
+
+          <label class="field-label" style="margin-top:20px;">Sub-questions</label>
+          <p style="color:var(--ink-soft);font-size:.8rem;margin:0 0 10px;">If this question breaks down into individually-answered parts (like SDC.410.a / .b), add them here. Each is answered on its own during an assessment.</p>
+          <div id="childrenContainer">
+            ${(q.children || []).map((c, i) => childEditorHTML(c, i)).join('') || '<p style="color:var(--ink-soft);font-size:.82rem;">No sub-questions yet.</p>'}
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="add-child">+ Add sub-question</button>
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost" data-action="close-modal">Cancel</button>
@@ -1090,9 +1357,27 @@ function render() {
    EVENT DELEGATION
 ========================================================================= */
 
+document.addEventListener('input', (e) => {
+  const ta = e.target.closest('.notes-textarea');
+  if (!ta) return;
+  const code = ta.getAttribute('data-code');
+  const r = findResponse(code);
+  if (r) r.notes = ta.value;
+  refreshItemState(code);
+});
+
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('[data-action]');
   if (!t) return;
+  try {
+    await handleClickAction(t, e);
+  } catch (err) {
+    console.error('Action failed:', err);
+    alert('Something went wrong: ' + (err && err.message ? err.message : err));
+  }
+});
+
+async function handleClickAction(t, e) {
   const action = t.getAttribute('data-action');
   const id = t.getAttribute('data-id');
 
@@ -1118,7 +1403,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'logout') { adminLogout(); return; }
   if (action === 'close-modal' || action === 'close-modal-overlay') {
     if (action === 'close-modal-overlay' && e.target !== t) return;
-    state.showPasswordModal = false; state.editingQuestion = null; state.editingLocation = null;
+    state.showPasswordModal = false; state.editingQuestion = null; state.editingLocation = null; qDraft = null;
     renderModal();
     return;
   }
@@ -1134,36 +1419,57 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  if (action === 'add-question') { state.editingQuestion = 'new'; renderModal(); return; }
+  if (action === 'add-question') { state.editingQuestion = 'new'; startQuestionEdit('new'); renderModal(); return; }
   if (action === 'edit-question') {
     const q = state.questions.find(x => x.id === id);
-    state.editingQuestion = q; renderModal(); return;
+    state.editingQuestion = q; startQuestionEdit(q); renderModal(); return;
   }
   if (action === 'delete-question') {
     if (!confirm('Delete this question? It will be removed from any templates using it.')) return;
     await deleteQuestionFromDb(id);
     return;
   }
+  if (action === 'add-link') {
+    syncQuestionDraftFromDom();
+    const scope = t.getAttribute('data-scope');
+    const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
+    target.links = target.links || [];
+    target.links.push({ label: '', url: '' });
+    renderModal();
+    return;
+  }
+  if (action === 'remove-link') {
+    syncQuestionDraftFromDom();
+    const scope = t.getAttribute('data-scope');
+    const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
+    target.links.splice(parseInt(t.getAttribute('data-index'), 10), 1);
+    renderModal();
+    return;
+  }
+  if (action === 'add-child') {
+    syncQuestionDraftFromDom();
+    qDraft.children.push({ id: '', text: '', guidance: '', options: ['Yes', 'No'], links: [] });
+    renderModal();
+    return;
+  }
+  if (action === 'remove-child') {
+    syncQuestionDraftFromDom();
+    qDraft.children.splice(parseInt(t.getAttribute('data-index'), 10), 1);
+    renderModal();
+    return;
+  }
   if (action === 'save-question') {
-    const qId = document.getElementById('qId').value.trim();
-    if (!qId) { alert('Please enter a question code.'); return; }
-    if (state.editingQuestion === 'new' && state.questions.some(q => q.id === qId)) {
+    syncQuestionDraftFromDom();
+    if (!qDraft.id) { alert('Please enter a question code.'); return; }
+    if (!qDraft.category || !qDraft.text.trim()) { alert('Category and question text are required.'); return; }
+    if (state.editingQuestion === 'new' && state.questions.some(q => q.id === qDraft.id)) {
       alert('A question with that code already exists. Use a different code or edit the existing one.');
       return;
     }
-    const options = document.getElementById('qOptions').value.split(',').map(s => s.trim()).filter(Boolean);
-    const q = {
-      id: qId,
-      category: document.getElementById('qCategory').value,
-      severity: document.getElementById('qSeverity').value,
-      text: document.getElementById('qText').value.trim(),
-      guidance: document.getElementById('qGuidance').value.trim(),
-      pathwayLink: true,
-      pathwayUrl: document.getElementById('qPathwayUrl').value.trim(),
-      options
-    };
-    await saveQuestionToDb(q);
-    state.editingQuestion = null; renderModal();
+    const missingChildId = (qDraft.children || []).find(c => !c.id.trim());
+    if (missingChildId) { alert('Every sub-question needs a code.'); return; }
+    await saveQuestionToDb(qDraft);
+    state.editingQuestion = null; qDraft = null; renderModal();
     return;
   }
 
@@ -1182,6 +1488,7 @@ document.addEventListener('click', async (e) => {
       id: id || undefined,
       name,
       description: document.getElementById('tplDesc').value.trim(),
+      frequency: document.getElementById('tplFrequency').value,
       questionIds: Array.from(window.__templateSelection)
     });
     state.editingTemplate = null; render();
@@ -1226,14 +1533,16 @@ document.addEventListener('click', async (e) => {
       if (!q) return;
       flattenAnswerable(q).forEach(item => {
         responses.push({
-          code: item.code, text: item.text, guidance: item.guidance, pathwayLink: item.pathwayLink,
-          pathwayUrl: item.isChild ? undefined : q.pathwayUrl, options: item.options, severity: item.severity, category: item.category,
+          code: item.code, text: item.text, guidance: item.guidance, links: item.links || [],
+          options: item.options, severity: item.severity, category: item.category,
           isChild: item.isChild, parentCode: item.parentCode, parentText: item.parentText,
-          parentGuidance: item.parentGuidance, parentPathwayLink: item.parentPathwayLink, parentPathwayUrl: item.parentPathwayUrl,
+          parentGuidance: item.parentGuidance || '', parentLinks: item.parentLinks || [],
           answer: null, notes: ''
         });
       });
     });
+    state.takeStage = 'filling';
+    state.takeValidationAttempted = false;
     state.draftRun = {
       id: uid('run'), templateId: tpl.id, templateName: tpl.name,
       locationId: state.selectedLocationId || '',
@@ -1245,7 +1554,7 @@ document.addEventListener('click', async (e) => {
   }
   if (action === 'resume-draft') {
     const d = loadLocalDrafts().find(x => x.id === id);
-    if (d) { state.draftRun = d; render(); }
+    if (d) { state.draftRun = d; state.takeStage = 'filling'; state.takeValidationAttempted = false; render(); }
     return;
   }
   if (action === 'discard-draft') {
@@ -1253,7 +1562,7 @@ document.addEventListener('click', async (e) => {
     removeLocalDraft(id); render();
     return;
   }
-  if (action === 'cancel-draft') { state.draftRun = null; render(); return; }
+  if (action === 'cancel-draft') { state.draftRun = null; state.takeStage = 'filling'; state.takeValidationAttempted = false; render(); return; }
   if (action === 'answer') {
     const code = t.getAttribute('data-code');
     const opt = t.getAttribute('data-option');
@@ -1262,12 +1571,16 @@ document.addEventListener('click', async (e) => {
     const group = t.closest('.option-group');
     group.querySelectorAll('.opt-btn').forEach(b => b.classList.remove('active'));
     t.classList.add('active');
-    updateProgressUI();
+    if (isFailOption(opt)) {
+      const wrap = document.getElementById('notes-wrap-' + code);
+      if (wrap) wrap.style.display = 'block';
+    }
+    refreshItemState(code);
     return;
   }
   if (action === 'toggle-notes') {
     const code = t.getAttribute('data-code');
-    const wrap = document.getElementById('notes-wrap-' + CSS.escape(code));
+    const wrap = document.getElementById('notes-wrap-' + code);
     if (wrap) wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
     return;
   }
@@ -1279,16 +1592,47 @@ document.addEventListener('click', async (e) => {
   }
   if (action === 'submit-run') {
     syncMetaFromDom();
-    const score = computeScore(state.draftRun.responses);
-    const finished = { ...state.draftRun, status: 'completed', score, completedAt: new Date().toISOString() };
-    delete finished.id;
-    const savedId = state.draftRun.id;
-    await submitRunToDb(finished);
-    removeLocalDraft(savedId);
-    state.draftRun = null;
-    alert('Assessment submitted.');
-    if (state.isAdmin) { state.view = 'reports'; }
+    const incomplete = state.draftRun.responses.filter(r => !isItemComplete(r));
+    if (incomplete.length > 0) {
+      state.takeValidationAttempted = true;
+      render();
+      setTimeout(() => {
+        const first = document.querySelector('.missing');
+        if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      return;
+    }
+    state.takeValidationAttempted = false;
+    state.takeStage = 'review';
     render();
+    return;
+  }
+  if (action === 'back-to-filling') { state.takeStage = 'filling'; render(); return; }
+  if (action === 'confirm-send-slack') {
+    document.querySelectorAll('.review-note-textarea').forEach(ta => {
+      const code = ta.getAttribute('data-code');
+      const r = findResponse(code);
+      if (r) r.notes = ta.value;
+    });
+    const score = computeScore(state.draftRun.responses);
+    const payload = buildSlackPayload(state.draftRun, score);
+    runSlackSendSequence(payload, async () => {
+      const finished = sanitizeForFirestore({ ...state.draftRun, status: 'completed', score, completedAt: new Date().toISOString() });
+      delete finished.id;
+      const savedId = state.draftRun.id;
+      try {
+        await submitRunToDb(finished);
+        removeLocalDraft(savedId);
+        state.draftRun = null;
+        state.takeStage = 'filling';
+        if (state.isAdmin) state.view = 'reports';
+        render();
+      } catch (err) {
+        console.error('Submit failed', err);
+        alert('Something went wrong submitting this assessment: ' + (err && err.message ? err.message : err) + '\n\nYour answers are safe — click Submit again to retry, or Save draft.');
+        render();
+      }
+    });
     return;
   }
 
@@ -1311,7 +1655,7 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (action === 'print') { window.print(); return; }
-});
+}
 
 function syncMetaFromDom() {
   const assessor = document.getElementById('metaAssessor');
