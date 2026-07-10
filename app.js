@@ -28,6 +28,7 @@ const state = {
   questions: [],
   templates: [],
   locations: [],
+  locationsLoaded: false,
   runs: [],
   runsLoaded: false,
   settingsTab: 'library',
@@ -36,6 +37,8 @@ const state = {
   editingQuestion: null,   // 'new' | {question, isChild, parentId} | null
   editingTemplate: null,   // 'new' | template | null
   editingLocation: null,   // 'new' | location | null
+  selectedLocationId: null,
+  selectedLocationName: null
 };
 
 /* =========================================================================
@@ -138,6 +141,17 @@ function removeLocalDraft(id) {
   saveLocalDrafts(loadLocalDrafts().filter(d => d.id !== id));
 }
 
+const LOCATION_KEY = 'safe_selected_location_v1';
+function loadSelectedLocation() {
+  try { return JSON.parse(localStorage.getItem(LOCATION_KEY) || 'null'); } catch (e) { return null; }
+}
+function saveSelectedLocation(id, name) {
+  try { localStorage.setItem(LOCATION_KEY, JSON.stringify({ id, name })); } catch (e) { console.error(e); }
+}
+function clearSelectedLocation() {
+  try { localStorage.removeItem(LOCATION_KEY); } catch (e) { console.error(e); }
+}
+
 /* =========================================================================
    FIRESTORE DATA LAYER
 ========================================================================= */
@@ -167,6 +181,19 @@ function subscribeLocations() {
     const l = [];
     snap.forEach(d => l.push({ id: d.id, ...d.data() }));
     state.locations = l;
+    state.locationsLoaded = true;
+
+    if (state.selectedLocationId && !l.some(x => x.id === state.selectedLocationId)) {
+      state.selectedLocationId = null;
+      state.selectedLocationName = null;
+      clearSelectedLocation();
+    }
+    if (!state.selectedLocationId && l.length === 1) {
+      state.selectedLocationId = l[0].id;
+      state.selectedLocationName = l[0].name;
+      saveSelectedLocation(l[0].id, l[0].name);
+    }
+
     render();
   }, err => console.error('locations listener error', err));
 }
@@ -286,6 +313,19 @@ function renderNav() {
     </button>
   `).join('');
 
+  const locEl = document.getElementById('locationIndicator');
+  if (locEl) {
+    locEl.innerHTML = state.selectedLocationName ? `
+      <div style="padding:8px 10px 4px;">
+        <div class="brand-sub" style="margin-bottom:2px;">Location</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="color:#fff;font-size:.85rem;font-weight:600;">${esc(state.selectedLocationName)}</span>
+          <button data-action="change-location" style="background:none;border:none;color:#93a4c2;font-size:.72rem;text-decoration:underline;cursor:pointer;padding:0;">Change</button>
+        </div>
+      </div>
+    ` : '';
+  }
+
   const foot = document.getElementById('sidebarFoot');
   if (state.isAdmin) {
     foot.innerHTML = `<div>Signed in as admin</div><button data-action="logout">Sign out</button>`;
@@ -331,6 +371,29 @@ function statCardHTML(label, value) {
 function emptyStateHTML(text) { return `<div class="empty-state"><p>${esc(text)}</p></div>`; }
 function pageHeaderHTML(eyebrow, title, actionHTML) {
   return `<div class="page-header"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1></div>${actionHTML || ''}</div>`;
+}
+
+/* =========================================================================
+   LOCATION GATE
+========================================================================= */
+
+function renderLocationGate() {
+  if (state.locations.length === 0) {
+    return `
+      <div class="banner"><h1>Which location is this?</h1><p>No locations have been set up yet.</p></div>
+      ${emptyStateHTML('An admin needs to add at least one location before assessments can be taken. Click Settings in the sidebar to sign in and add one.')}
+    `;
+  }
+  return `
+    <div class="banner"><h1>Which location is this?</h1><p>Select your restaurant to continue. This device will remember your choice.</p></div>
+    <div class="template-grid">
+      ${state.locations.map(l => `
+        <div class="template-card clickable" data-action="select-location" data-id="${esc(l.id)}">
+          <h3>${esc(l.name)}</h3>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
 /* =========================================================================
@@ -451,9 +514,7 @@ function renderTakeInProgress() {
     <div class="panel meta-form">
       <div class="meta-field">
         <label>Location</label>
-        <select id="metaLocation">
-          ${state.locations.map(l => `<option value="${esc(l.id)}" ${run.locationId === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}
-        </select>
+        <input value="${esc(run.locationName || 'Not set')}" disabled />
       </div>
       <div class="meta-field">
         <label>Assessor</label>
@@ -925,7 +986,7 @@ function renderModal() {
   if (state.showPasswordModal) {
     root.innerHTML = `
       <div class="modal-overlay" data-action="close-modal-overlay">
-        <div class="modal password-modal" onclick="event.stopPropagation()">
+        <div class="modal password-modal">
           <div class="modal-header"><h3>Admin access</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
           <div class="modal-body">
             <p style="color:var(--ink-soft);font-size:.85rem;">Enter the password to view Reports and Settings.</p>
@@ -952,7 +1013,7 @@ function questionModalHTML() {
   const q = isNew ? { id: '', category: state.categories[0] || '', severity: 'MEDIUM', text: '', guidance: '', pathwayLink: false, pathwayUrl: '', options: ['Yes', 'No'] } : state.editingQuestion;
   return `
     <div class="modal-overlay" data-action="close-modal-overlay">
-      <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal">
         <div class="modal-header"><h3>${isNew ? 'Add a question' : 'Edit question'}</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
         <div class="modal-body">
           ${isNew ? `<label class="field-label">Question code</label><input id="qId" placeholder="e.g. SDC.999" />` : `<input type="hidden" id="qId" value="${esc(q.id)}" />`}
@@ -987,7 +1048,7 @@ function locationModalHTML() {
   const l = isNew ? { name: '' } : state.editingLocation;
   return `
     <div class="modal-overlay" data-action="close-modal-overlay">
-      <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal">
         <div class="modal-header"><h3>${isNew ? 'Add location' : 'Edit location'}</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
         <div class="modal-body">
           <label class="field-label">Location name</label>
@@ -1009,12 +1070,16 @@ function locationModalHTML() {
 function render() {
   renderNav();
   const main = document.getElementById('main');
-  if (!state.loaded) {
+  if (!state.loaded || !state.locationsLoaded) {
     main.innerHTML = `<div class="loading-screen">Loading&hellip;</div>`;
     return;
   }
-  if (state.view === 'dashboard') main.innerHTML = renderDashboard();
-  else if (state.view === 'take') main.innerHTML = renderTake();
+  if (state.view === 'dashboard') {
+    main.innerHTML = (!state.isAdmin && !state.selectedLocationId) ? renderLocationGate() : renderDashboard();
+  }
+  else if (state.view === 'take') {
+    main.innerHTML = (!state.selectedLocationId && !state.draftRun) ? renderLocationGate() : renderTake();
+  }
   else if (state.view === 'reports') main.innerHTML = state.isAdmin ? renderReports() : renderDashboard();
   else if (state.view === 'settings') main.innerHTML = state.isAdmin ? renderSettings() : renderDashboard();
   else if (state.view === 'runDetail') main.innerHTML = state.isAdmin ? renderRunDetail() : renderDashboard();
@@ -1030,6 +1095,24 @@ document.addEventListener('click', async (e) => {
   if (!t) return;
   const action = t.getAttribute('data-action');
   const id = t.getAttribute('data-id');
+
+  if (action === 'select-location') {
+    const loc = state.locations.find(x => x.id === id);
+    if (!loc) return;
+    state.selectedLocationId = loc.id;
+    state.selectedLocationName = loc.name;
+    saveSelectedLocation(loc.id, loc.name);
+    render();
+    return;
+  }
+  if (action === 'change-location') {
+    if (state.draftRun && !confirm('You have an assessment in progress. Changing location will not affect it, but you will need to pick a location again for future assessments. Continue?')) return;
+    state.selectedLocationId = null;
+    state.selectedLocationName = null;
+    clearSelectedLocation();
+    render();
+    return;
+  }
 
   if (action === 'nav') { goToView(t.getAttribute('data-view')); return; }
   if (action === 'logout') { adminLogout(); return; }
@@ -1153,8 +1236,8 @@ document.addEventListener('click', async (e) => {
     });
     state.draftRun = {
       id: uid('run'), templateId: tpl.id, templateName: tpl.name,
-      locationId: state.locations[0] ? state.locations[0].id : '',
-      locationName: state.locations[0] ? state.locations[0].name : '',
+      locationId: state.selectedLocationId || '',
+      locationName: state.selectedLocationName || '',
       assessorName: '', date: todayISO(), responses, status: 'in-progress', createdAt: new Date().toISOString()
     };
     render();
@@ -1231,14 +1314,8 @@ document.addEventListener('click', async (e) => {
 });
 
 function syncMetaFromDom() {
-  const locSel = document.getElementById('metaLocation');
   const assessor = document.getElementById('metaAssessor');
   const date = document.getElementById('metaDate');
-  if (locSel) {
-    state.draftRun.locationId = locSel.value;
-    const loc = state.locations.find(l => l.id === locSel.value);
-    state.draftRun.locationName = loc ? loc.name : '';
-  }
   if (assessor) state.draftRun.assessorName = assessor.value;
   if (date) state.draftRun.date = date.value;
   document.querySelectorAll('.notes-textarea').forEach(ta => {
@@ -1268,4 +1345,8 @@ document.getElementById('sidebarBackdrop').addEventListener('click', () => {
 subscribeQuestions();
 subscribeTemplates();
 subscribeLocations();
+(function initLocation() {
+  const saved = loadSelectedLocation();
+  if (saved) { state.selectedLocationId = saved.id; state.selectedLocationName = saved.name; }
+})();
 render();
