@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SAFE Self-Assessments</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div id="topbar" class="topbar">
+  <button class="icon-btn" id="menuBtn" style="color:#fff;">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <span class="topbar-title">SAFE Self-Assessments</span>
+</div>
+
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div>
+        <div class="brand-title">SAFE</div>
+        <div class="brand-sub">Self-Assessments</div>
+      </div>
+    </div>
+    <nav id="navList"></nav>
+    <div class="sidebar-foot" id="sidebarFoot"></div>
+  </aside>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <main class="main" id="main">
+    <div class="loading-screen">Loading&hellip;</div>
+  </main>
+</div>
+
+<div id="modalRoot"></div>
+
+<!-- Local, non-secret config + seed question bank -->
+<script src="firebase-config.js"></script>
+<script src="data-questions.js"></script>
+
+<!-- Firebase (modular CDN build) -->
+<script type="module" src="app.js"></script>
+
+</body>
+</html>

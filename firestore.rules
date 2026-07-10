@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// ---------------------------------------------------------------------
+// How this maps to the app:
+// - Nobody signs in to take an assessment (public read of the question
+//   bank / templates / locations, public create of new "runs").
+// - There is exactly ONE admin account (created by hand in the Firebase
+//   Console -> Authentication tab, using the email in firebase-config.js).
+//   Since there is no sign-up flow anywhere in the app, any signed-in
+//   user IS the admin — so `request.auth != null` is all we need.
+// ---------------------------------------------------------------------
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null;
+    }
+
+    // Question bank — everyone can read it (needed to take an
+    // assessment without logging in); only the admin can edit it.
+    match /questions/{questionId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Assessment templates — same pattern.
+    match /templates/{templateId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Locations — same pattern.
+    match /locations/{locationId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Completed assessments — anyone can submit one (create only, no
+    // read/update/delete), but only the admin can view, edit, or
+    // delete the Reports data. This is what keeps location data from
+    // being readable by the public and keeps "Reports" gated.
+    match /runs/{runId} {
+      allow create: if true;
+      allow read, update, delete: if isAdmin();
+    }
+  }
+}
