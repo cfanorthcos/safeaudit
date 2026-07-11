@@ -660,7 +660,7 @@ function renderTakeReview() {
     </div>
 
     ${failed.length === 0 ? `
-      <div class="panel"><h3>Nothing missed &mdash; nice work.</h3><p style="color:var(--ink-soft);font-size:.88rem;margin:0;">Every item passed. You can still add a general note below before sending, or just confirm and submit.</p></div>
+      <div class="panel"><h3>Nothing missed &mdash; nice work.</h3><p style="color:var(--ink-soft);font-size:.88rem;margin:0;">Every item passed. This will submit quietly unless you add a note below.</p></div>
     ` : `
       <section class="panel">
         <h3>Missed questions (${failed.length}) &mdash; review notes before sending</h3>
@@ -678,34 +678,66 @@ function renderTakeReview() {
       </section>
     `}
 
+    <section class="panel">
+      <h3>General notes ${failed.length === 0 ? '(optional)' : '(optional, added to the Slack summary)'}</h3>
+      <textarea id="generalNotesInput" rows="3" placeholder="Anything else worth flagging&hellip;">${esc(run.generalNotes || '')}</textarea>
+    </section>
+
     <div class="sticky-footer">
       <button class="btn btn-ghost" data-action="back-to-filling">Back to assessment</button>
-      <button class="btn btn-primary" data-action="confirm-send-slack">Confirm &amp; send to Slack</button>
+      <button class="btn btn-primary" data-action="confirm-submit">Confirm &amp; submit</button>
     </div>
-    <div class="hint">This sends a summary of missed questions to Slack, then submits the assessment.</div>
+    <div class="hint">${failed.length > 0 ? 'This sends a Slack summary of the missed questions, then submits.' : 'A Slack summary only sends if you add a note above \u2014 otherwise this just submits.'}</div>
   `;
 }
 
 function buildSlackPayload(run, score) {
   const failed = run.responses.filter(r => isFailOption(r.answer));
-  const lines = failed.map(r => '\u2022 [' + r.severity + '] ' + r.code + ': ' + r.text + (r.notes ? '\n   note: ' + r.notes : ''));
+  const perfect = failed.length === 0;
+
+  const header = perfect
+    ? ':white_check_mark: *SAFE Assessment \u2014 ' + (run.locationName || 'Unknown location') + ' \u2014 Perfect score!*'
+    : ':rotating_light: *SAFE Assessment \u2014 ' + (run.locationName || 'Unknown location') + '*';
+
+  const meta = 'Template: ' + run.templateName + '  |  Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date);
+  const scoreLine = 'Score: *' + score.grade + ' (' + score.percent + '%)*' + (score.criticalFails ? '  \u2014 :warning: ' + score.criticalFails + ' IMMEDIATE failure' + (score.criticalFails > 1 ? 's' : '') : '');
+
+  const missedLines = failed.map(r =>
+    '\u2022 *[' + r.severity + ']* ' + r.code + ' \u2014 ' + r.text + (r.notes ? '\n   _note: ' + r.notes + '_' : '')
+  );
+  const missedBlock = perfect ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
+  const notesBlock = run.generalNotes && run.generalNotes.trim() ? '\n\n*Additional notes:*\n' + run.generalNotes.trim() : '';
+
+  const text = [header, meta, scoreLine + missedBlock + notesBlock].join('\n');
+
   return {
-    text:
-      'SAFE Assessment submitted \u2014 ' + (run.locationName || 'Unknown location') + '\n' +
-      'Template: ' + run.templateName + '\n' +
-      'Assessor: ' + (run.assessorName || 'Unnamed') + '\n' +
-      'Date: ' + run.date + '\n' +
-      'Score: ' + score.grade + ' (' + score.percent + '%)' + (score.criticalFails ? ' \u2014 ' + score.criticalFails + ' IMMEDIATE failure(s)' : '') + '\n\n' +
-      (failed.length ? 'Missed questions (' + failed.length + '):\n' + lines.join('\n') : 'No missed questions \u2014 great job!')
+    text,
+    location: run.locationName || '',
+    template: run.templateName || '',
+    assessor: run.assessorName || '',
+    date: run.date || '',
+    grade: score.grade,
+    percent: score.percent,
+    criticalFails: score.criticalFails,
+    missedCount: failed.length,
+    missedSummary: missedLines.join('\n'),
+    generalNotes: run.generalNotes || ''
   };
 }
 
+async function sendToZapierWebhook(payload) {
+  const url = window.ZAPIER_WEBHOOK_URL;
+  if (!url || url === 'REPLACE_ME') throw new Error('No Zapier webhook URL configured in firebase-config.js yet.');
+  // Deliberately no custom headers and mode:'no-cors' — Zapier's webhook
+  // endpoint doesn't return proper CORS headers for a normal JSON POST
+  // from a browser, but it still receives and parses the body fine this
+  // way. We can't read a response back (it's an opaque request), so a
+  // thrown error here means the network request itself failed, not that
+  // Zapier necessarily rejected the data.
+  await fetch(url, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
+}
+
 function runSlackSendSequence(payload, onDone) {
-  // NOTE: this is simulated on purpose (per request, to validate the flow
-  // before wiring a real webhook). Swap the setTimeout stages below for an
-  // actual fetch() to your Slack Incoming Webhook URL when ready — see
-  // SETUP.md for the security caveat about calling webhooks from the client.
-  console.log('[Slack webhook simulation] Would send:', payload);
   state.showingSlackAnim = true;
   const root = document.getElementById('modalRoot');
   root.innerHTML = `
@@ -721,21 +753,25 @@ function runSlackSendSequence(payload, onDone) {
       </div>
     </div>
   `;
-  setTimeout(() => {
+  setTimeout(async () => {
     const s = document.getElementById('slackStatus');
     if (s) s.textContent = 'Sending to Slack\u2026';
-  }, 650);
-  setTimeout(() => {
-    const wrap = document.getElementById('slackIconWrap');
-    const s = document.getElementById('slackStatus');
-    if (wrap) wrap.classList.add('done');
-    if (s) s.innerHTML = 'Sent <span class="pill-outline">simulated \u2014 no webhook connected yet</span>';
-  }, 1500);
-  setTimeout(() => {
-    document.getElementById('modalRoot').innerHTML = '';
-    state.showingSlackAnim = false;
-    onDone();
-  }, 2300);
+    try {
+      await sendToZapierWebhook(payload);
+      const wrap = document.getElementById('slackIconWrap');
+      if (wrap) wrap.classList.add('done');
+      if (s) s.innerHTML = 'Sent to Slack';
+    } catch (err) {
+      console.error('Slack webhook failed', err);
+      const s2 = document.getElementById('slackStatus');
+      if (s2) s2.innerHTML = 'Couldn\u2019t reach Slack \u2014 submitting anyway';
+    }
+    setTimeout(() => {
+      document.getElementById('modalRoot').innerHTML = '';
+      state.showingSlackAnim = false;
+      onDone();
+    }, 900);
+  }, 500);
 }
 
 function showPhotoLightbox(url) {
@@ -1666,6 +1702,12 @@ function renderRunDetail() {
         ) : ''}
       </div>
     </div>
+    ${run.generalNotes ? `
+      <section class="panel">
+        <h3>General notes</h3>
+        <p style="white-space:pre-wrap;font-size:.88rem;margin:0;">${esc(run.generalNotes)}</p>
+      </section>
+    ` : ''}
     ${failed.length > 0 ? `
       <section class="panel">
         <h3>Items needing attention</h3>
@@ -2317,15 +2359,20 @@ async function handleClickAction(t, e) {
     return;
   }
   if (action === 'back-to-filling') { state.takeStage = 'filling'; render(); return; }
-  if (action === 'confirm-send-slack') {
+  if (action === 'confirm-submit') {
     document.querySelectorAll('.review-note-textarea').forEach(ta => {
       const code = ta.getAttribute('data-code');
       const r = findResponse(code);
       if (r) r.notes = ta.value;
     });
+    const notesEl = document.getElementById('generalNotesInput');
+    state.draftRun.generalNotes = notesEl ? notesEl.value.trim() : '';
+
     const score = computeScore(state.draftRun.responses);
-    const payload = buildSlackPayload(state.draftRun, score);
-    runSlackSendSequence(payload, async () => {
+    const failed = state.draftRun.responses.filter(r => isFailOption(r.answer));
+    const shouldNotifySlack = failed.length > 0 || !!state.draftRun.generalNotes;
+
+    const finishSubmit = async () => {
       const finished = sanitizeForFirestore({ ...state.draftRun, status: 'completed', score, completedAt: new Date().toISOString() });
       delete finished.id;
       const savedId = state.draftRun.id;
@@ -2341,7 +2388,14 @@ async function handleClickAction(t, e) {
         alert('Something went wrong submitting this assessment: ' + (err && err.message ? err.message : err) + '\n\nYour answers are safe — click Submit again to retry, or Save draft.');
         render();
       }
-    });
+    };
+
+    if (shouldNotifySlack) {
+      const payload = buildSlackPayload(state.draftRun, score);
+      runSlackSendSequence(payload, finishSubmit);
+    } else {
+      await finishSubmit();
+    }
     return;
   }
 
