@@ -814,7 +814,7 @@ function renderTakeItem(it) {
     <div class="child-item ${it.answer != null ? 'answered' : ''} ${missing ? 'missing' : ''}" data-code="${esc(it.code)}">
       ${it.isChild ? `<div class="q-text">${esc(it.text)} ${linksHTML(it.links)}</div>` : ''}
       ${it.guidance ? `<div class="q-guidance">${esc(it.guidance)}</div>` : ''}
-      ${photoThumbsHTML(it.photos)}
+      ${it.isChild ? photoThumbsHTML(it.photos) : ''}
       ${hasOptions ? `
         <div class="option-group" data-code="${esc(it.code)}">
           ${it.options.map(opt => {
