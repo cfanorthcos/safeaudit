@@ -437,8 +437,8 @@ function stampHTML(grade, percent, size) {
     <div class="stamp-percent" style="font-size:${pctSize}px">${percent}%</div>
   </div>`;
 }
-function statCardHTML(label, value) {
-  return `<div class="stat-card"><div class="stat-value">${esc(value)}</div><div class="stat-label">${esc(label)}</div></div>`;
+function statCardHTML(label, value, sub) {
+  return `<div class="stat-card"><div class="stat-value">${esc(value)}</div><div class="stat-label">${esc(label)}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
 }
 function emptyStateHTML(text) { return `<div class="empty-state"><p>${esc(text)}</p></div>`; }
 function pageHeaderHTML(eyebrow, title, actionHTML) {
@@ -1302,7 +1302,7 @@ function computeTopOpportunities(completedRuns, limit) {
     .slice(0, limit || 8);
 }
 
-function ringHTML(label, percent, sublabel, size) {
+function ringHTML(label, percent, sublabel, size, deltaVsPrev) {
   size = size || 108;
   const stroke = 9;
   const r = (size - stroke) / 2;
@@ -1310,6 +1310,10 @@ function ringHTML(label, percent, sublabel, size) {
   const pct = Math.max(0, Math.min(100, percent));
   const offset = c * (1 - pct / 100);
   const color = pct >= 90 ? 'var(--safe)' : pct >= 75 ? 'var(--medium)' : 'var(--danger)';
+  const deltaHTML = deltaVsPrev == null ? '' : `
+    <div class="ring-delta ${deltaVsPrev > 0 ? 'trend-up' : deltaVsPrev < 0 ? 'trend-down' : 'trend-flat'}">
+      ${deltaVsPrev > 0 ? '&#9650;' : deltaVsPrev < 0 ? '&#9660;' : '&#9679;'} ${Math.abs(deltaVsPrev)}
+    </div>`;
   return `
     <div class="ring-card">
       <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
@@ -1321,8 +1325,27 @@ function ringHTML(label, percent, sublabel, size) {
       </svg>
       <div class="ring-label">${esc(label)}</div>
       ${sublabel ? `<div class="ring-sublabel">${esc(sublabel)}</div>` : ''}
+      ${deltaHTML}
     </div>
   `;
+}
+
+function deltaSubHTML(delta, prevCount) {
+  if (delta == null) return '';
+  if (!prevCount) return '';
+  const cls = delta > 0 ? 'trend-up' : delta < 0 ? 'trend-down' : 'trend-flat';
+  const arrow = delta > 0 ? '&#9650;' : delta < 0 ? '&#9660;' : '&#9679;';
+  return `<span class="${cls}">${arrow} ${Math.abs(delta)}% vs previous period</span>`;
+}
+
+function computePreviousPeriod(fromStr, toStr) {
+  const from = new Date(fromStr + 'T00:00:00');
+  const to = new Date(toStr + 'T00:00:00');
+  const lengthMs = to.getTime() - from.getTime();
+  const prevTo = new Date(from);
+  prevTo.setDate(prevTo.getDate() - 1);
+  const prevFrom = new Date(prevTo.getTime() - lengthMs);
+  return { from: prevFrom.toISOString().slice(0, 10), to: prevTo.toISOString().slice(0, 10) };
 }
 
 function trendDeltaHTML(series) {
@@ -1434,16 +1457,41 @@ function renderReports() {
         <option value="all">All</option>
       </select>
     </div>
-    <div id="repBody">${buildReportsBodyHTML('', 'all', 'completed')}</div>
+    <div class="filter-bar">
+      <select id="repDatePreset" onchange="window.__repApplyPreset()">
+        <option value="">All time</option>
+        <option value="7">Last 7 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="thismonth">This month</option>
+        <option value="lastmonth">Last month</option>
+      </select>
+      <div class="meta-field" style="margin:0;">
+        <label style="margin:0;">From</label>
+        <input type="date" id="repDateFrom" onchange="window.__repDateChanged()" />
+      </div>
+      <div class="meta-field" style="margin:0;">
+        <label style="margin:0;">To</label>
+        <input type="date" id="repDateTo" onchange="window.__repDateChanged()" />
+      </div>
+      <button class="btn btn-ghost btn-sm" data-action="clear-date-range">Clear dates</button>
+    </div>
+    <div id="repBody">${buildReportsBodyHTML('', 'all', 'completed', '', '')}</div>
   `;
 }
 
-function buildReportsBodyHTML(search, locFilter, statusFilter) {
+function buildReportsBodyHTML(search, locFilter, statusFilter, dateFrom, dateTo) {
   const s = (search || '').toLowerCase();
-  const filtered = state.runs.filter(r => {
+  function matchesCommon(r) {
     if (statusFilter !== 'all' && r.status !== statusFilter) return false;
     if (locFilter !== 'all' && r.locationId !== locFilter) return false;
     if (s && !((r.locationName || '').toLowerCase().includes(s) || (r.assessorName || '').toLowerCase().includes(s))) return false;
+    return true;
+  }
+  const filtered = state.runs.filter(r => {
+    if (!matchesCommon(r)) return false;
+    if (dateFrom && r.date < dateFrom) return false;
+    if (dateTo && r.date > dateTo) return false;
     return true;
   }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -1451,12 +1499,27 @@ function buildReportsBodyHTML(search, locFilter, statusFilter) {
   const avg = completed.length ? Math.round(completed.reduce((s2, r) => s2 + r.score.percent, 0) / completed.length) : null;
   const critFails = completed.filter(r => r.score.criticalFails > 0).length;
 
+  // Previous-period comparison: same length range immediately preceding
+  // the selected range, using the same location/status/search filters.
+  let prevCompleted = [];
+  let comparisonRange = null;
+  if (dateFrom && dateTo) {
+    comparisonRange = computePreviousPeriod(dateFrom, dateTo);
+    prevCompleted = state.runs.filter(r => {
+      if (!matchesCommon(r)) return false;
+      if (r.date < comparisonRange.from || r.date > comparisonRange.to) return false;
+      return r.status === 'completed';
+    });
+  }
+  const prevAvg = prevCompleted.length ? Math.round(prevCompleted.reduce((s2, r) => s2 + r.score.percent, 0) / prevCompleted.length) : null;
+  const avgDelta = (avg !== null && prevAvg !== null) ? avg - prevAvg : null;
+
   window.__reportsFiltered = filtered;
 
   let html = `
     <div class="stat-grid">
       ${statCardHTML('Assessments shown', filtered.length)}
-      ${statCardHTML('Average score', avg !== null ? avg + '%' : '\u2014')}
+      ${statCardHTML('Average score', avg !== null ? avg + '%' : '\u2014', deltaSubHTML(avgDelta, prevCompleted.length))}
       ${statCardHTML('Critical (IMMEDIATE) failures', critFails)}
       ${statCardHTML('Locations', state.locations.length)}
     </div>
@@ -1475,6 +1538,9 @@ function buildReportsBodyHTML(search, locFilter, statusFilter) {
     html += emptyStateHTML('Trends and category breakdowns will show up here once there are a couple more completed assessments in this range.');
   } else {
     const catStats = computeCategoryStats(completed);
+    const prevCatStats = prevCompleted.length ? computeCategoryStats(prevCompleted) : [];
+    const prevCatLookup = {};
+    prevCatStats.forEach(c => { prevCatLookup[c.category] = c.percent; });
     const trendSeries = computeTrendSeries(completed);
     const dowStats = computeDayOfWeekStats(completed);
     const topOpportunities = computeTopOpportunities(completed, 8);
@@ -1484,8 +1550,9 @@ function buildReportsBodyHTML(search, locFilter, statusFilter) {
     html += `
       <section class="panel">
         <h3>Category performance</h3>
+        ${comparisonRange ? `<p style="color:var(--ink-soft);font-size:.78rem;margin:-6px 0 12px;">vs. ${fmtDate(comparisonRange.from)}&ndash;${fmtDate(comparisonRange.to)}${prevCompleted.length === 0 ? ' (no completed assessments in that range)' : ''}</p>` : ''}
         <div class="ring-row">
-          ${catStats.map(c => ringHTML(c.category, c.percent, c.total + ' checks', 100)).join('')}
+          ${catStats.map(c => ringHTML(c.category, c.percent, c.total + ' checks', 100, prevCatLookup[c.category] != null ? c.percent - prevCatLookup[c.category] : null)).join('')}
         </div>
       </section>
 
@@ -1537,8 +1604,38 @@ window.__repFilter = function () {
   const search = document.getElementById('repSearch').value;
   const loc = document.getElementById('repLocFilter').value;
   const status = document.getElementById('repStatusFilter').value;
-  document.getElementById('repBody').innerHTML = buildReportsBodyHTML(search, loc, status);
+  const dateFrom = document.getElementById('repDateFrom').value;
+  const dateTo = document.getElementById('repDateTo').value;
+  document.getElementById('repBody').innerHTML = buildReportsBodyHTML(search, loc, status, dateFrom, dateTo);
   initReportCharts();
+};
+
+window.__repDateChanged = function () {
+  document.getElementById('repDatePreset').value = '';
+  window.__repFilter();
+};
+
+window.__repApplyPreset = function () {
+  const preset = document.getElementById('repDatePreset').value;
+  const fromEl = document.getElementById('repDateFrom');
+  const toEl = document.getElementById('repDateTo');
+  const toISO = d => d.toISOString().slice(0, 10);
+  const today = new Date();
+  if (preset === '') {
+    fromEl.value = ''; toEl.value = '';
+  } else if (preset === '7' || preset === '30' || preset === '90') {
+    const days = parseInt(preset, 10);
+    const from = new Date(today);
+    from.setDate(from.getDate() - (days - 1));
+    fromEl.value = toISO(from); toEl.value = toISO(today);
+  } else if (preset === 'thismonth') {
+    fromEl.value = toISO(new Date(today.getFullYear(), today.getMonth(), 1));
+    toEl.value = toISO(today);
+  } else if (preset === 'lastmonth') {
+    fromEl.value = toISO(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+    toEl.value = toISO(new Date(today.getFullYear(), today.getMonth(), 0));
+  }
+  window.__repFilter();
 };
 
 function renderRunDetail() {
@@ -2272,6 +2369,13 @@ async function handleClickAction(t, e) {
       r.status
     ]));
     downloadText('safe-assessments.csv', toCSV(rows), 'text/csv');
+    return;
+  }
+  if (action === 'clear-date-range') {
+    document.getElementById('repDatePreset').value = '';
+    document.getElementById('repDateFrom').value = '';
+    document.getElementById('repDateTo').value = '';
+    window.__repFilter();
     return;
   }
   if (action === 'print') { window.print(); return; }
