@@ -26,3 +26,14 @@ window.FIREBASE_CONFIG = {
 // only thing your team will ever type — this email just lives behind the
 // scenes so Firebase Auth has something to authenticate against).
 window.ADMIN_EMAIL = "admin@opshub.internal";
+
+// ---------------------------------------------------------------------
+// Zapier webhook (for the Slack notification on assessment submission)
+// ---------------------------------------------------------------------
+// UNLIKE the Firebase values above, this URL is NOT safe in the same
+// way — anyone who views your site's source can see it and could POST
+// to it directly, triggering fake Slack messages or burning through
+// your Zapier task quota. It's a low-stakes exposure (worst case is
+// spam messages in one Slack channel, not access to your data), but
+// it's real. See SETUP.md for how to create this in Zapier.
+window.ZAPIER_WEBHOOK_URL = "REPLACE_ME";
