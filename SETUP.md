@@ -57,35 +57,39 @@ protect your data, not hiding this file.
 Without this step, either nobody can read/write anything, or (if you
 left it in test mode) everyone can — so don't skip it.
 
-## 5b. Reference photos (free, no billing needed)
+## 5b. Turn on Storage (for reference photos)
 
 Photos attach to questions in Settings -> Question Library — e.g. a
-photo showing scoop handles pointing the correct direction. Rather than
-using Firebase Storage (which now requires a paid Blaze plan — see the
-optional note at the end of this section), photos are hosted for free
-right alongside the rest of the app on GitHub Pages:
+photo showing scoop handles pointing the correct direction. This uses
+Firebase Storage so that anyone with the admin password can upload a
+photo directly from the question editor — no GitHub access needed.
 
-1. In your GitHub repo, create a folder named `photos` (Add file ->
-   Create new file, type `photos/.gitkeep` as the name to create the
-   folder, or just drag image files in and GitHub will offer to create
-   the folder for you).
-2. Upload your image files into that folder the same way you upload
-   everything else (Add file -> Upload files). Keep filenames simple —
-   lowercase, no spaces, e.g. `scoop-handles.jpg`.
-3. In the app, when editing a question in Settings -> Question Library,
-   find **Reference photos** and type the path you just uploaded to
-   (e.g. `photos/scoop-handles.jpg`), then click **Add photo**.
+**This requires Firebase's paid "Blaze" plan** (as of February 2026,
+Google no longer allows Cloud Storage on the free plan at all). Blaze
+is still pay-as-you-go, not a flat fee, and includes a no-cost quota
+before anything is actually billed — for a handful of locations
+uploading resized reference photos, this should realistically stay at
+$0/month, but it does need a payment method on file.
 
-That's it — no Firebase Storage, no billing, no quotas. The only
-manual step is uploading the file to GitHub yourself before referencing
-it in the app, rather than uploading directly from the question editor.
+1. Click the gear icon -> **Usage and billing** -> upgrade to **Blaze**
+   (you'll be asked to link a payment method).
+2. While you're there, set up a **budget alert**: gear icon -> Usage
+   and billing -> Details & settings -> Budgets & alerts -> Create
+   budget. Pick your project, set an amount like $1-5, and make sure
+   your email is the recipient. This is a notification only — it won't
+   stop or pause anything — but it means you'd know immediately if
+   usage ever looked different than expected.
+3. In the left sidebar, click **Build -> Storage** -> **Get started**
+   -> click through the setup prompts (default location is fine,
+   ideally the same region you picked for Firestore).
+4. Click the **Rules** tab and paste in the entire contents of
+   `storage.rules` from this project. Click **Publish**.
 
-*Optional, for later:* if you'd rather upload photos directly from
-inside the app (skipping the GitHub upload step), that's possible using
-Firebase Storage, but it requires upgrading to the paid "Blaze" plan
-(free-tier-eligible, but a card is required — see our earlier
-conversation about costs). Ask if you'd like that version restored;
-it's a quick change to bring back.
+That's it. Anyone signed in with the admin password can now add a
+photo straight from the question editor — pick a file, it uploads and
+resizes automatically (max 1600px on the longest side, so it stays
+fast to load without losing the detail you need — e.g. to actually see
+scoop-handle orientation clearly).
 
 ## 6. (Optional) Use a different admin email
 
@@ -102,9 +106,7 @@ leave it as-is, or change it to anything you like as long as:
    requires public repos unless you're on GitHub Pro/Team/Enterprise).
 2. Upload all the files in this project to the repo root:
    `index.html`, `styles.css`, `app.js`, `data-questions.js`,
-   `firebase-config.js` (with your real values filled in), plus a
-   `photos/` folder with any reference photos you want to use (see
-   step 5b — this can be added any time, not just now).
+   `firebase-config.js` (with your real values filled in).
    You don't need to upload `firestore.rules`, `storage.rules`, or this
    `SETUP.md` — they're
    not used by the live site — but there's no harm in keeping them in
@@ -135,12 +137,13 @@ leave it as-is, or change it to anything you like as long as:
 - **Reference photos on questions**: in the question editor (Settings ->
   Question Library -> edit or add a question, and the same for each
   sub-question), you can now attach photos — e.g. a photo showing scoop
-  handles pointing the correct direction. They're hosted for free
-  alongside the rest of the app on GitHub Pages (see step 5b) rather
-  than through paid Firebase Storage — upload the image to a `photos/`
-  folder in your repo, then paste its filename into the question
-  editor. They show up right in the assessment when someone's taking
-  it, and clicking one opens it full-size.
+  handles pointing the correct direction. Pick a file and it uploads
+  and resizes automatically (max 1600px on the longest side, to stay
+  fast without losing detail). They show up right in the assessment
+  when someone's taking it, and clicking one opens it full-size. Needs
+  Storage turned on — see step 5b above. Anyone with the admin password
+  can add a photo this way, same as adding a question or building a
+  template — no GitHub access needed.
 - **Acknowledging IMMEDIATE failures**: the Dashboard now lists each
   completed assessment with an unreviewed IMMEDIATE (critical) item
   failure, with a "Mark reviewed" button right there. Reviewing one
@@ -165,12 +168,15 @@ leave it as-is, or change it to anything you like as long as:
   like a real assessment (right fields, right types, reasonable size)
   before accepting it, instead of accepting any data at all. Re-publish
   the updated `firestore.rules` (Firestore Database -> Rules -> paste
-  -> Publish) to pick this up. This raises the bar against random junk
-  being written to your database, but it doesn't stop a determined,
-  targeted script — for that, the next layer would be **Firebase App
-  Check** (Build -> App Check in the console), which verifies requests
-  are coming from your actual site rather than a bot, without requiring
-  anyone to log in. Ask if you'd like help setting that up.
+  -> Publish) to pick this up. Similarly, `storage.rules` now caps
+  individual photo uploads at 3MB (down from an initial 10MB) — plenty
+  of headroom since the app resizes photos before upload anyway, but
+  a tighter ceiling against anything unexpected. Neither of these stops
+  a determined, targeted script from someone who already has the admin
+  password — for that, the next layer would be **Firebase App Check**
+  (Build -> App Check in the console), which verifies requests are
+  coming from your actual site rather than a bot. Ask if you'd like
+  help setting that up.
 
 ## Known limitations in this version
 
@@ -192,14 +198,14 @@ leave it as-is, or change it to anything you like as long as:
      that can keep the URL private, like a small Firebase Cloud
      Function or Zapier webhook. Happy to help set that up when you get
      there.
-- **Photos aren't resized automatically.** Since photos are just files
-  in your GitHub repo rather than uploaded through the app, there's no
-  automatic compression step — a huge phone photo will load slowly on
-  a spotty kitchen wifi connection. Worth resizing images yourself
-  before uploading (aim for under ~500KB, maybe 1200-1600px on the
-  longest side — plenty of detail for something like scoop-handle
-  orientation) using your phone's share/edit tools or any free online
-  image resizer.
+- **Canceling a photo upload mid-edit**: if you upload a photo while
+  editing a question and then hit Cancel instead of Save, that photo
+  file stays in Storage even though the question doesn't reference it
+  (removing a photo with its own "x" button, or removing a sub-question
+  entirely, does clean up properly — it's specifically the "upload,
+  then Cancel the whole edit" path that leaves a stray file). These are
+  small resized JPEGs, so the storage cost is negligible even if a few
+  pile up, but worth knowing about.
 - **Drafts are per-device**: an in-progress assessment is saved in the
   browser you're using (so you can close the tab and come back), but it
   won't show up if you open the app on a different phone or computer.
@@ -210,6 +216,10 @@ leave it as-is, or change it to anything you like as long as:
 
 Firebase's free "Spark" plan includes 1 GiB stored and 50k reads / 20k
 writes per day in Firestore, and unlimited free Email/Password
-authentication — this app (including reference photos, since those are
-hosted on GitHub Pages rather than Firebase) costs $0 to run as
-described in this guide.
+authentication — that part of this app costs $0 regardless.
+
+Storage (for reference photos) requires the paid "Blaze" plan (see
+step 5b) — but Blaze is pay-as-you-go with its own no-cost quota before
+billing kicks in, so a handful of locations uploading resized photos
+should still realistically land at $0/month. The budget alert set up
+in step 5b will tell you right away if that ever changed.
