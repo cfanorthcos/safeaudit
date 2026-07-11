@@ -132,7 +132,112 @@ leave it as-is, or change it to anything you like as long as:
    (or select every question for a "Full SAFE Assessment").
 6. Head to **Take Assessment** to try it end-to-end.
 
+- **Custom date range with period comparison.** Reports now has a date
+  range filter (with quick presets: last 7/30/90 days, this month, last
+  month, or pick your own From/To) alongside the existing
+  location/status/search filters. When a range is set, category
+  performance rings show a small delta arrow comparing against the
+  immediately preceding period of the same length (e.g. a 30-day range
+  compares against the 30 days right before it) — the Average score
+  stat card gets the same comparison. Everything else (trend chart,
+  day-of-week, top opportunities, the table) filters to the selected
+  range too.
+
 ## New since last update
+
+- **Real Slack notifications, via Zapier.** The "Confirm & Submit" step
+  at the end of an assessment now actually posts to Slack (previously
+  simulated). It only sends when there's something worth flagging —
+  one or more missed questions, or a general note the assessor typed
+  in — a perfect run with no note just submits quietly, no Slack
+  message. There's also a new "General notes" field on the review
+  screen for anything beyond the per-question notes, which gets
+  included in the Slack message and saved with the report.
+
+  **Setup required — do this in Zapier, not Firebase:**
+  1. In Zapier, create a new Zap.
+  2. Trigger: search for **Webhooks by Zapier**, choose **Catch Hook**,
+     continue past the optional "child key" prompt, and click
+     **Continue**. Zapier will show you a webhook URL — copy it.
+  3. Paste that URL into `firebase-config.js`, replacing
+     `window.ZAPIER_WEBHOOK_URL = "REPLACE_ME"`.
+  4. Back in Zapier, add an action: search for **Slack**, choose
+     **Send Channel Message**, and connect your Slack workspace if you
+     haven't already.
+  5. Pick the channel, then in the **Message Text** field, click the
+     field picker and insert the `text` field from the webhook trigger
+     — this is a complete, pre-formatted message (bold headers, a
+     bullet list of missed questions, notes included), so this one
+     field is all you need for a working message. If you'd rather
+     build your own custom layout instead, the webhook also sends
+     `location`, `template`, `assessor`, `date`, `grade`, `percent`,
+     `criticalFails`, `missedCount`, `missedSummary`, and
+     `generalNotes` as separate fields you can mix and match.
+  6. Test the step in Zapier (it'll ask you to trigger the webhook
+     first — go take a test assessment in the app and mark something
+     as failed, then come back and test the Slack step), then turn the
+     Zap **on**.
+  7. Upload the updated `firebase-config.js` to GitHub.
+
+  **On the exposed webhook URL:** unlike the Firebase config values,
+  this one genuinely is sensitive — it's visible to anyone who views
+  your site's source, and anyone who has it could trigger fake Slack
+  messages or run through your Zapier task quota. This is a real
+  trade-off, not a false alarm, but it's a low-stakes one: the worst
+  case is spam in one Slack channel, not access to your data (nothing
+  else in the app is reachable through this URL). If your Zapier plan
+  has a monthly task limit, it's worth an occasional glance at your
+  Zapier task usage, same spirit as the Firebase budget alert.
+
+  **Testing the "quiet on perfect runs" behavior:** take one assessment
+  and mark everything as passing with no general note — confirm it
+  submits without a Slack message. Then take another and either fail
+  one item or add a general note — confirm that one does send.
+
+- **Location asked every time.** Take Assessment now asks which
+  location this is *every time* you open it (rather than remembering
+  a choice on that device) — useful if one device gets used across
+  multiple locations. If there's only one location total, it's picked
+  automatically since there's nothing to choose. The Dashboard no
+  longer needs a location at all.
+- **Add a question straight from Build Assessment.** While choosing
+  questions for a template (Settings -> Build Assessment -> "1. Choose
+  questions"), there's now a "+ Add question" button that opens the
+  same question editor — save it and it's automatically added to the
+  template you're building, no need to go to the Question Library
+  first.
+- **Question codes are now optional.** Leave the code field blank when
+  adding a question (or a sub-question) and one gets generated
+  automatically. Still useful to set your own if you want to match an
+  existing numbering scheme (like the SDC.### codes from your original
+  export), but no longer required.
+- **Add categories.** Settings -> Categories is a new tab for adding
+  category names directly (a category can't be deleted while any
+  question still uses it). You can also add a brand new category
+  inline while editing a question, via "+ New category…" in the
+  category dropdown. **Requires re-publishing `firestore.rules`**
+  (Firestore Database -> Rules -> paste the updated file -> Publish) —
+  it now includes a rule for the new `meta` collection categories are
+  stored in.
+- **Reports got a real upgrade** — new analytics show up automatically
+  once there are at least a couple of completed assessments in the
+  current filter:
+  - **Category performance rings** — a circular score per category
+    (green/amber/red) so you can see at a glance which areas are
+    strongest and weakest.
+  - **Score trend** — a line chart of scores over time, plus a plain-
+    English callout on whether the more recent half of the range is
+    running better or worse than the earlier half.
+  - **Opportunity by day of week** — a bar chart of average score per
+    weekday, with a callout naming the day that's currently the
+    biggest opportunity and the day performing best.
+  - **Top opportunities** — a ranked list of the specific questions
+    failing most often across the assessments currently shown, so you
+    know exactly where to focus training or fixes.
+  All of this respects the existing location/status/search filters —
+  filter down to one location or a date range (via search) and the
+  charts update to match. This uses Chart.js, loaded from a CDN in
+  `index.html` alongside SortableJS.
 
 - **Reference photos on questions**: in the question editor (Settings ->
   Question Library -> edit or add a question, and the same for each
