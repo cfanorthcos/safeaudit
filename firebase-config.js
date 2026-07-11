@@ -36,4 +36,4 @@ window.ADMIN_EMAIL = "admin@opshub.internal";
 // your Zapier task quota. It's a low-stakes exposure (worst case is
 // spam messages in one Slack channel, not access to your data), but
 // it's real. See SETUP.md for how to create this in Zapier.
-window.ZAPIER_WEBHOOK_URL = "REPLACE_ME";
+window.ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/10599539/4ugb54p/";
