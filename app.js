@@ -40,7 +40,8 @@ const state = {
   selectedLocationId: null,
   selectedLocationName: null,
   takeStage: 'filling',          // 'filling' | 'review'
-  takeValidationAttempted: false
+  takeValidationAttempted: false,
+  templateEditorTab: 'select'
 };
 
 /* =========================================================================
@@ -241,10 +242,14 @@ async function saveQuestionToDb(q) {
 }
 async function deleteQuestionFromDb(id) {
   await deleteDoc(doc(db, 'questions', id));
-  // also strip from any templates referencing it
+  // also strip from any templates referencing it (both the flat list and any sections)
   const updates = state.templates.filter(t => (t.questionIds || []).includes(id));
   for (const t of updates) {
-    await updateDoc(doc(db, 'templates', t.id), { questionIds: t.questionIds.filter(x => x !== id) });
+    const nextSections = (t.sections || []).map(s => ({ ...s, questionIds: s.questionIds.filter(x => x !== id) }));
+    await updateDoc(doc(db, 'templates', t.id), sanitizeForFirestore({
+      questionIds: t.questionIds.filter(x => x !== id),
+      sections: nextSections
+    }));
   }
 }
 async function saveTemplateToDb(t) {
@@ -440,7 +445,7 @@ function renderDashboard() {
 
   const completed = state.runs.filter(r => r.status === 'completed');
   const avg = completed.length ? Math.round(completed.reduce((s, r) => s + r.score.percent, 0) / completed.length) : null;
-  const criticalFailCount = completed.filter(r => r.score.criticalFails > 0).length;
+  const criticalRuns = completed.filter(r => r.score.criticalFails > 0 && !r.acknowledged);
   const recent = completed.slice().sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt)).slice(0, 5);
 
   return `
@@ -471,7 +476,22 @@ function renderDashboard() {
       <section class="panel">
         <h3>Quick actions</h3>
         <button class="btn btn-primary" data-action="nav" data-view="take">Start an assessment</button>
-        ${criticalFailCount > 0 ? `<div class="callout callout-danger">${criticalFailCount} completed assessment${criticalFailCount > 1 ? 's have' : ' has'} an IMMEDIATE item failure. Review in Reports.</div>` : ''}
+        ${criticalRuns.length > 0 ? `
+          <div class="callout callout-danger" style="flex-direction:column;align-items:stretch;gap:8px;">
+            <div style="display:flex;align-items:center;gap:8px;"><span>&#9888;</span> ${criticalRuns.length} assessment${criticalRuns.length > 1 ? 's need' : ' needs'} review for an IMMEDIATE item failure:</div>
+            <ul class="run-list" style="margin:0;">
+              ${criticalRuns.map(r => `
+                <li class="run-row" style="border-top:1px solid rgba(212,61,61,.2);padding:8px 0;">
+                  <div style="flex:1;">
+                    <div class="run-title" data-action="open-run" data-id="${r.id}" style="cursor:pointer;">${esc(r.templateName)} &mdash; ${esc(r.locationName || '\u2014')}</div>
+                    <div class="run-meta">${fmtDate(r.date)} &middot; ${esc(r.assessorName || 'Unnamed')}</div>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" data-action="acknowledge-run" data-id="${r.id}">Mark reviewed</button>
+                </li>
+              `).join('')}
+            </ul>
+          </div>
+        ` : ''}
       </section>
     </div>
   `;
@@ -528,8 +548,8 @@ function renderTakeInProgress() {
   const pct = total ? Math.round((answered / total) * 100) : 0;
   const incompleteCount = total - answered;
 
-  const byCategory = {};
-  run.responses.forEach(r => { (byCategory[r.category] = byCategory[r.category] || []).push(r); });
+  const bySection = {};
+  run.responses.forEach(r => { (bySection[r.sectionName || r.category] = bySection[r.sectionName || r.category] || []).push(r); });
 
   return `
     ${pageHeaderHTML(run.templateName, 'Assessment in progress',
@@ -559,10 +579,10 @@ function renderTakeInProgress() {
       </div>
     ` : ''}
 
-    ${Object.keys(byCategory).map(cat => `
+    ${Object.keys(bySection).map(sec => `
       <section class="panel">
-        <h3>${esc(cat)}</h3>
-        ${groupByParent(byCategory[cat]).map(g => renderTakeGroup(g)).join('')}
+        <h3>${esc(sec)}</h3>
+        ${groupByParent(bySection[sec]).map(g => renderTakeGroup(g)).join('')}
       </section>
     `).join('')}
 
@@ -903,9 +923,11 @@ function renderTemplatesTab() {
   `;
 }
 
+let sectionsDraft = [];
+let sortableInstances = [];
+
 function renderTemplateEditor() {
   const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [] } : state.editingTemplate;
-  window.__templateSelection = new Set(t.questionIds || []);
   const frequencies = ['Daily', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'As Needed'];
 
   return `
@@ -920,6 +942,23 @@ function renderTemplateEditor() {
       </select>
     </div>
     <div class="filter-bar">
+      <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">1. Choose questions</button>
+      <button class="btn ${state.templateEditorTab === 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="arrange">2. Arrange order</button>
+      <div class="pill-outline" id="tplSelCount" style="margin-left:auto;">${window.__templateSelection.size} selected</div>
+    </div>
+    <div id="templateEditorBody">
+      ${state.templateEditorTab === 'arrange' ? renderArrangeTab() : renderSelectTab()}
+    </div>
+    <div class="sticky-footer">
+      <button class="btn btn-ghost" data-action="cancel-template-edit">Cancel</button>
+      <button class="btn btn-primary" data-action="save-template" data-id="${t.id || ''}">Save template</button>
+    </div>
+  `;
+}
+
+function renderSelectTab() {
+  return `
+    <div class="filter-bar">
       <div class="search-box"><input id="tplSearch" placeholder="Search questions&hellip;" oninput="window.__tplFilter()" /></div>
       <select id="tplCatFilter" onchange="window.__tplFilter()">
         <option value="all">All categories</option>
@@ -932,13 +971,8 @@ function renderTemplateEditor() {
         <option value="MEDIUM">Medium</option>
         <option value="LOW">Low</option>
       </select>
-      <div class="pill-outline" id="tplSelCount">${window.__templateSelection.size} selected</div>
     </div>
     <div id="tplListContainer">${buildTemplateSelectHTML('', 'all', 'all')}</div>
-    <div class="sticky-footer">
-      <button class="btn btn-ghost" data-action="cancel-template-edit">Cancel</button>
-      <button class="btn btn-primary" data-action="save-template" data-id="${t.id || ''}">Save template</button>
-    </div>
   `;
 }
 
@@ -985,6 +1019,99 @@ window.__tplFilter = function () {
   document.getElementById('tplListContainer').innerHTML = buildTemplateSelectHTML(search, cat, sev);
   document.getElementById('tplSelCount').textContent = window.__templateSelection.size + ' selected';
 };
+
+/* ---- Arrange tab: freely reorderable, drag-and-drop sections ---- */
+
+function reconcileSections() {
+  const selected = window.__templateSelection;
+  sectionsDraft.forEach(s => { s.questionIds = s.questionIds.filter(id => selected.has(id)); });
+  const placed = new Set(sectionsDraft.flatMap(s => s.questionIds));
+  const newly = Array.from(selected).filter(id => !placed.has(id));
+  if (newly.length) {
+    if (sectionsDraft.length === 0) {
+      const byCat = {};
+      newly.forEach(id => {
+        const q = state.questions.find(x => x.id === id);
+        const cat = q ? q.category : 'Uncategorized';
+        (byCat[cat] = byCat[cat] || []).push(id);
+      });
+      state.categories.forEach(c => { if (byCat[c]) sectionsDraft.push({ id: uid('sec'), name: c, questionIds: byCat[c] }); });
+      Object.keys(byCat).forEach(c => { if (!state.categories.includes(c)) sectionsDraft.push({ id: uid('sec'), name: c, questionIds: byCat[c] }); });
+    } else {
+      let unassigned = sectionsDraft.find(s => s.id === '__unassigned__');
+      if (!unassigned) { unassigned = { id: '__unassigned__', name: 'Unassigned', questionIds: [] }; sectionsDraft.push(unassigned); }
+      unassigned.questionIds.push(...newly);
+    }
+  }
+  sectionsDraft = sectionsDraft.filter(s => s.questionIds.length > 0 || s.id !== '__unassigned__');
+}
+
+function renderArrangeTab() {
+  reconcileSections();
+  const sortableMissing = typeof Sortable === 'undefined';
+  return `
+    <p style="color:var(--ink-soft);font-size:.85rem;margin:0 0 12px;">Drag questions to reorder them or move them between sections &mdash; e.g. to match the physical path through your kitchen. Drag a section's grip handle to reorder whole sections. This becomes the order your team sees when taking the assessment.</p>
+    ${sortableMissing ? `<div class="callout callout-danger">Drag-and-drop didn't load (check your internet connection and reload the page) &mdash; question selection still works, but reordering won't until this loads.</div>` : ''}
+    <div id="sectionsContainer" class="sections-list">
+      ${sectionsDraft.map(s => renderSectionBlock(s)).join('')}
+    </div>
+    <button class="btn btn-ghost btn-sm" data-action="add-section">+ Add section</button>
+  `;
+}
+
+function renderSectionBlock(s) {
+  return `
+    <div class="section-block ${s.id === '__unassigned__' ? 'unassigned' : ''}" data-section-id="${esc(s.id)}">
+      <div class="section-header">
+        <span class="section-drag-handle" title="Drag to reorder this section">&#8942;&#8942;</span>
+        ${s.id === '__unassigned__'
+          ? `<span class="section-name-label">Unassigned <span class="pill-outline">not yet in a section</span></span>`
+          : `<input class="section-name-input" value="${esc(s.name)}" placeholder="Section name (e.g. Walk-in Cooler)" />`}
+        ${s.id !== '__unassigned__' ? `<button class="icon-btn" data-action="delete-section" data-section-id="${esc(s.id)}" title="Delete section">&times;</button>` : ''}
+      </div>
+      <ul class="section-questions" data-section-id="${esc(s.id)}">
+        ${s.questionIds.map(qid => {
+          const q = state.questions.find(x => x.id === qid);
+          if (!q) return '';
+          return `
+            <li class="arrange-row" data-qid="${esc(qid)}">
+              <span class="drag-handle">&#8942;&#8942;</span>
+              ${badgeHTML(q.severity)}
+              <span class="q-code">${esc(qid)}</span>
+              <span class="arrange-text">${esc(q.text)}</span>
+            </li>
+          `;
+        }).join('')}
+      </ul>
+    </div>
+  `;
+}
+
+function readSectionsFromDom() {
+  const blocks = document.querySelectorAll('#sectionsContainer .section-block');
+  if (!blocks.length) return sectionsDraft;
+  const next = [];
+  blocks.forEach(block => {
+    const id = block.getAttribute('data-section-id');
+    const nameInput = block.querySelector('.section-name-input');
+    const name = id === '__unassigned__' ? 'Unassigned' : (nameInput ? nameInput.value.trim() : '');
+    const qids = Array.from(block.querySelectorAll('.arrange-row')).map(r => r.getAttribute('data-qid'));
+    next.push({ id, name, questionIds: qids });
+  });
+  return next;
+}
+
+function initArrangeSortables() {
+  sortableInstances.forEach(s => s.destroy());
+  sortableInstances = [];
+  if (typeof Sortable === 'undefined') return;
+  const container = document.getElementById('sectionsContainer');
+  if (!container) return;
+  sortableInstances.push(new Sortable(container, { animation: 150, handle: '.section-drag-handle' }));
+  container.querySelectorAll('.section-questions').forEach(ul => {
+    sortableInstances.push(new Sortable(ul, { group: 'template-questions', animation: 150, handle: '.drag-handle' }));
+  });
+}
 
 function renderLocationsTab() {
   return `
@@ -1071,7 +1198,7 @@ function buildReportsBodyHTML(search, locFilter, statusFilter) {
               <td>${esc(r.templateName)}</td>
               <td>${esc(r.locationName || '\u2014')}</td>
               <td>${esc(r.assessorName || '\u2014')}</td>
-              <td>${r.status === 'completed' ? `<span class="grade-pill" style="color:${gradeColorVar(r.score.grade)};border-color:${gradeColorVar(r.score.grade)}">${esc(r.score.grade)} &middot; ${r.score.percent}%</span>` : '\u2014'}</td>
+              <td>${r.status === 'completed' ? `<span class="grade-pill" style="color:${gradeColorVar(r.score.grade)};border-color:${gradeColorVar(r.score.grade)}">${esc(r.score.grade)} &middot; ${r.score.percent}%</span> ${r.score.criticalFails > 0 && !r.acknowledged ? '<span class="status-pill" style="background:rgba(212,61,61,.12);color:var(--danger);margin-left:4px;">Needs review</span>' : ''}` : '\u2014'}</td>
               <td><span class="status-pill status-${r.status}">${r.status === 'completed' ? 'Completed' : 'Draft'}</span></td>
               <td><button class="icon-btn" data-action="delete-run" data-id="${r.id}">&times;</button></td>
             </tr>
@@ -1095,7 +1222,7 @@ function renderRunDetail() {
   if (!run) return emptyStateHTML('Assessment not found.');
   const failed = run.responses.filter(r => isFailOption(r.answer));
   const byCategory = {};
-  run.responses.forEach(r => (byCategory[r.category] = byCategory[r.category] || []).push(r));
+  run.responses.forEach(r => (byCategory[r.sectionName || r.category] = byCategory[r.sectionName || r.category] || []).push(r));
 
   return `
     ${pageHeaderHTML('Report', run.templateName, `
@@ -1111,6 +1238,11 @@ function renderRunDetail() {
         <div>${esc(run.locationName || 'No location')}</div>
         <div>${fmtDate(run.date)}</div>
         <div class="score-breakdown">${run.score.pass} passed &middot; ${run.score.fail} failed &middot; ${run.score.excluded} excluded${run.score.criticalFails > 0 ? ' &middot; ' + run.score.criticalFails + ' IMMEDIATE failure' + (run.score.criticalFails > 1 ? 's' : '') : ''}</div>
+        ${run.score.criticalFails > 0 ? (
+          run.acknowledged
+            ? `<div style="margin-top:6px;"><span class="status-pill status-completed">&#10003; Reviewed</span> <button class="btn btn-ghost btn-sm" data-action="unacknowledge-run" data-id="${run.id}" style="margin-left:6px;">Undo</button></div>`
+            : `<button class="btn btn-primary btn-sm" data-action="acknowledge-run" data-id="${run.id}" style="margin-top:6px;">Mark reviewed</button>`
+        ) : ''}
       </div>
     </div>
     ${failed.length > 0 ? `
@@ -1351,6 +1483,9 @@ function render() {
   else if (state.view === 'settings') main.innerHTML = state.isAdmin ? renderSettings() : renderDashboard();
   else if (state.view === 'runDetail') main.innerHTML = state.isAdmin ? renderRunDetail() : renderDashboard();
   renderModal();
+  if (state.view === 'settings' && state.isAdmin && state.settingsTab === 'templates' && state.editingTemplate && state.templateEditorTab === 'arrange') {
+    initArrangeSortables();
+  }
 }
 
 /* =========================================================================
@@ -1473,9 +1608,24 @@ async function handleClickAction(t, e) {
     return;
   }
 
-  if (action === 'new-template') { state.editingTemplate = 'new'; render(); return; }
-  if (action === 'edit-template') { state.editingTemplate = state.templates.find(x => x.id === id); render(); return; }
-  if (action === 'cancel-template-edit') { state.editingTemplate = null; render(); return; }
+  if (action === 'new-template') {
+    state.editingTemplate = 'new';
+    state.templateEditorTab = 'select';
+    window.__templateSelection = new Set();
+    sectionsDraft = [];
+    render();
+    return;
+  }
+  if (action === 'edit-template') {
+    const tpl = state.templates.find(x => x.id === id);
+    state.editingTemplate = tpl;
+    state.templateEditorTab = 'select';
+    window.__templateSelection = new Set(tpl.questionIds || []);
+    sectionsDraft = tpl.sections ? JSON.parse(JSON.stringify(tpl.sections)) : [];
+    render();
+    return;
+  }
+  if (action === 'cancel-template-edit') { state.editingTemplate = null; sectionsDraft = []; render(); return; }
   if (action === 'delete-template') {
     if (!confirm('Delete this template?')) return;
     await deleteTemplateFromDb(id);
@@ -1484,14 +1634,18 @@ async function handleClickAction(t, e) {
   if (action === 'save-template') {
     const name = document.getElementById('tplName').value.trim();
     if (!name || window.__templateSelection.size === 0) { alert('Give the template a name and select at least one question.'); return; }
+    reconcileSections();
+    const sections = readSectionsFromDom(); // picks up live DOM order if the Arrange tab is mounted, else falls back to sectionsDraft
+    const flatIds = sections.flatMap(s => s.questionIds);
     await saveTemplateToDb({
       id: id || undefined,
       name,
       description: document.getElementById('tplDesc').value.trim(),
       frequency: document.getElementById('tplFrequency').value,
-      questionIds: Array.from(window.__templateSelection)
+      sections: sections.map(s => ({ id: s.id, name: s.name, questionIds: s.questionIds })),
+      questionIds: flatIds
     });
-    state.editingTemplate = null; render();
+    state.editingTemplate = null; sectionsDraft = []; render();
     return;
   }
   if (action === 'toggle-question-select') {
@@ -1504,6 +1658,34 @@ async function handleClickAction(t, e) {
     const allSelected = ids.every(x => window.__templateSelection.has(x));
     ids.forEach(x => allSelected ? window.__templateSelection.delete(x) : window.__templateSelection.add(x));
     window.__tplFilter();
+    return;
+  }
+  if (action === 'template-editor-tab') {
+    if (state.templateEditorTab === 'arrange') sectionsDraft = readSectionsFromDom();
+    state.templateEditorTab = t.getAttribute('data-tab');
+    render();
+    return;
+  }
+  if (action === 'add-section') {
+    sectionsDraft = readSectionsFromDom();
+    sectionsDraft.push({ id: uid('sec'), name: '', questionIds: [] });
+    render();
+    return;
+  }
+  if (action === 'delete-section') {
+    sectionsDraft = readSectionsFromDom();
+    const sid = t.getAttribute('data-section-id');
+    const idx = sectionsDraft.findIndex(s => s.id === sid);
+    if (idx === -1) return;
+    const removed = sectionsDraft[idx];
+    if (removed.questionIds.length && !confirm('This section has ' + removed.questionIds.length + ' question(s). Delete it and move them to Unassigned?')) return;
+    sectionsDraft.splice(idx, 1);
+    if (removed.questionIds.length) {
+      let unassigned = sectionsDraft.find(s => s.id === '__unassigned__');
+      if (!unassigned) { unassigned = { id: '__unassigned__', name: 'Unassigned', questionIds: [] }; sectionsDraft.push(unassigned); }
+      unassigned.questionIds.push(...removed.questionIds);
+    }
+    render();
     return;
   }
 
@@ -1528,16 +1710,22 @@ async function handleClickAction(t, e) {
     const tpl = state.templates.find(x => x.id === id);
     if (!tpl) return;
     const responses = [];
-    tpl.questionIds.forEach(qid => {
-      const q = state.questions.find(x => x.id === qid);
-      if (!q) return;
-      flattenAnswerable(q).forEach(item => {
-        responses.push({
-          code: item.code, text: item.text, guidance: item.guidance, links: item.links || [],
-          options: item.options, severity: item.severity, category: item.category,
-          isChild: item.isChild, parentCode: item.parentCode, parentText: item.parentText,
-          parentGuidance: item.parentGuidance || '', parentLinks: item.parentLinks || [],
-          answer: null, notes: ''
+    const sectionList = (tpl.sections && tpl.sections.length)
+      ? tpl.sections
+      : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
+    sectionList.forEach(section => {
+      section.questionIds.forEach(qid => {
+        const q = state.questions.find(x => x.id === qid);
+        if (!q) return;
+        flattenAnswerable(q).forEach(item => {
+          responses.push({
+            code: item.code, text: item.text, guidance: item.guidance, links: item.links || [],
+            options: item.options, severity: item.severity, category: item.category,
+            sectionName: section.name || item.category,
+            isChild: item.isChild, parentCode: item.parentCode, parentText: item.parentText,
+            parentGuidance: item.parentGuidance || '', parentLinks: item.parentLinks || [],
+            answer: null, notes: ''
+          });
         });
       });
     });
@@ -1636,6 +1824,14 @@ async function handleClickAction(t, e) {
     return;
   }
 
+  if (action === 'acknowledge-run') {
+    await updateDoc(doc(db, 'runs', id), { acknowledged: true });
+    return;
+  }
+  if (action === 'unacknowledge-run') {
+    await updateDoc(doc(db, 'runs', id), { acknowledged: false });
+    return;
+  }
   if (action === 'open-run') { state.activeRunId = id; state.view = 'runDetail'; render(); return; }
   if (action === 'delete-run') {
     if (!confirm('Delete this assessment report?')) return;
