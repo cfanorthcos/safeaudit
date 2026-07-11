@@ -313,6 +313,21 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
   .main { padding: 0; max-width: none; }
 }
 
+/* ---------- Reports analytics ---------- */
+.ring-row { display: flex; flex-wrap: wrap; gap: 20px; }
+.ring-card { display: flex; flex-direction: column; align-items: center; width: 110px; }
+.ring-pct { font-family: 'Inter', sans-serif; font-weight: 800; font-size: 1.15rem; fill: var(--ink); }
+.ring-label { font-size: .74rem; font-weight: 600; text-align: center; margin-top: 6px; line-height: 1.25; }
+.ring-sublabel { font-family: 'IBM Plex Mono', monospace; font-size: .66rem; color: var(--ink-soft); margin-top: 2px; }
+
+.chart-wrap { position: relative; height: 220px; }
+
+.trend-delta { margin-top: 10px; font-size: .85rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.trend-up { color: var(--safe); }
+.trend-down { color: var(--danger); }
+.trend-flat { color: var(--ink-soft); }
+.dow-summary { margin-top: 10px; font-size: .84rem; color: var(--ink); line-height: 1.5; }
+
 @media (max-width: 860px) {
   .topbar { display: flex; }
   .app-shell { flex-direction: column; }
