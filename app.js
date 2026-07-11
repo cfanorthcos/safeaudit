@@ -161,17 +161,6 @@ function removeLocalDraft(id) {
   saveLocalDrafts(loadLocalDrafts().filter(d => d.id !== id));
 }
 
-const LOCATION_KEY = 'safe_selected_location_v1';
-function loadSelectedLocation() {
-  try { return JSON.parse(localStorage.getItem(LOCATION_KEY) || 'null'); } catch (e) { return null; }
-}
-function saveSelectedLocation(id, name) {
-  try { localStorage.setItem(LOCATION_KEY, JSON.stringify({ id, name })); } catch (e) { console.error(e); }
-}
-function clearSelectedLocation() {
-  try { localStorage.removeItem(LOCATION_KEY); } catch (e) { console.error(e); }
-}
-
 /* =========================================================================
    FIRESTORE DATA LAYER
 ========================================================================= */
@@ -202,18 +191,6 @@ function subscribeLocations() {
     snap.forEach(d => l.push({ id: d.id, ...d.data() }));
     state.locations = l;
     state.locationsLoaded = true;
-
-    if (state.selectedLocationId && !l.some(x => x.id === state.selectedLocationId)) {
-      state.selectedLocationId = null;
-      state.selectedLocationName = null;
-      clearSelectedLocation();
-    }
-    if (!state.selectedLocationId && l.length === 1) {
-      state.selectedLocationId = l[0].id;
-      state.selectedLocationName = l[0].name;
-      saveSelectedLocation(l[0].id, l[0].name);
-    }
-
     render();
   }, err => {
     console.error('locations listener error', err);
@@ -221,6 +198,21 @@ function subscribeLocations() {
     render();
   });
 }
+function subscribeCategories() {
+  onSnapshot(doc(db, 'meta', 'categories'), snap => {
+    if (snap.exists()) {
+      state.categories = snap.data().list || [];
+    } else {
+      state.categories = (window.SEED_CATEGORIES || []).slice();
+      setDoc(doc(db, 'meta', 'categories'), { list: state.categories }).catch(err => console.error('failed to seed categories', err));
+    }
+    render();
+  }, err => console.error('categories listener error', err));
+}
+async function saveCategoriesToDb(list) {
+  await setDoc(doc(db, 'meta', 'categories'), sanitizeForFirestore({ list }));
+}
+
 let runsUnsub = null;
 function subscribeRunsIfAdmin() {
   if (runsUnsub) { runsUnsub(); runsUnsub = null; }
@@ -389,19 +381,6 @@ function renderNav() {
     </button>
   `).join('');
 
-  const locEl = document.getElementById('locationIndicator');
-  if (locEl) {
-    locEl.innerHTML = state.selectedLocationName ? `
-      <div style="padding:8px 10px 4px;">
-        <div class="brand-sub" style="margin-bottom:2px;">Location</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <span style="color:#fff;font-size:.85rem;font-weight:600;">${esc(state.selectedLocationName)}</span>
-          <button data-action="change-location" style="background:none;border:none;color:#93a4c2;font-size:.72rem;text-decoration:underline;cursor:pointer;padding:0;">Change</button>
-        </div>
-      </div>
-    ` : '';
-  }
-
   const foot = document.getElementById('sidebarFoot');
   if (state.isAdmin) {
     foot.innerHTML = `<div>Signed in as admin</div><button data-action="logout">Sign out</button>`;
@@ -415,6 +394,12 @@ function goToView(view) {
     state.pendingView = view;
     openPasswordModal();
     return;
+  }
+  if (view === 'take' && !state.draftRun) {
+    // Ask for the location fresh every time Take Assessment is opened,
+    // unless there's exactly one location (nothing to actually choose).
+    state.selectedLocationId = null;
+    state.selectedLocationName = null;
   }
   state.view = view;
   render();
@@ -877,7 +862,8 @@ function renderSettings() {
   const tabs = [
     { key: 'library', label: 'Question Library' },
     { key: 'templates', label: 'Build Assessment' },
-    { key: 'locations', label: 'Locations' }
+    { key: 'locations', label: 'Locations' },
+    { key: 'categories', label: 'Categories' }
   ];
   return `
     ${pageHeaderHTML('Settings', 'Manage your SAFE program')}
@@ -892,6 +878,7 @@ function renderSettingsBody() {
   if (state.settingsTab === 'library') return renderLibraryTab();
   if (state.settingsTab === 'templates') return renderTemplatesTab();
   if (state.settingsTab === 'locations') return renderLocationsTab();
+  if (state.settingsTab === 'categories') return renderCategoriesTab();
   return '';
 }
 
@@ -1047,6 +1034,7 @@ function renderSelectTab() {
         <option value="MEDIUM">Medium</option>
         <option value="LOW">Low</option>
       </select>
+      <button class="btn btn-primary btn-sm" data-action="add-question">+ Add question</button>
     </div>
     <div id="tplListContainer">${buildTemplateSelectHTML('', 'all', 'all')}</div>
   `;
@@ -1212,9 +1200,225 @@ function renderLocationsTab() {
   `;
 }
 
+function renderCategoriesTab() {
+  const counts = {};
+  state.categories.forEach(c => { counts[c] = 0; });
+  state.questions.forEach(q => { counts[q.category] = (counts[q.category] || 0) + 1; });
+
+  return `
+    <div class="panel">
+      <label class="field-label">Add a category</label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="newCategoryInput" placeholder="e.g. Allergen Control" style="flex:1;" />
+        <button class="btn btn-primary btn-sm" data-action="add-category">Add</button>
+      </div>
+    </div>
+    ${state.categories.length === 0 ? emptyStateHTML('No categories yet.') : `
+      <div class="panel">
+        <ul class="loc-list">
+          ${state.categories.map(c => `
+            <li class="loc-row">
+              <span>${esc(c)} <span class="pill-outline">${counts[c] || 0} question${counts[c] === 1 ? '' : 's'}</span></span>
+              <span>
+                <button class="icon-btn" data-action="delete-category" data-name="${esc(c)}" title="${counts[c] > 0 ? 'Cannot delete \u2014 still in use' : 'Delete category'}" ${counts[c] > 0 ? 'disabled' : ''}>&times;</button>
+              </span>
+            </li>
+          `).join('')}
+        </ul>
+      </div>
+    `}
+  `;
+}
+
 /* =========================================================================
    REPORTS
 ========================================================================= */
+
+/* ---- Reports analytics: category stats, trends, day-of-week, top opportunities ---- */
+
+function scoreableResponses(runs) {
+  const out = [];
+  runs.forEach(r => {
+    (r.responses || []).forEach(resp => {
+      if (!resp.options || !resp.options.length) return;
+      if (resp.answer == null || isExcludedOption(resp.answer)) return;
+      out.push({ run: r, resp });
+    });
+  });
+  return out;
+}
+
+function computeCategoryStats(completedRuns) {
+  const agg = {};
+  scoreableResponses(completedRuns).forEach(({ resp }) => {
+    const cat = resp.category;
+    if (!agg[cat]) agg[cat] = { pass: 0, total: 0 };
+    agg[cat].total++;
+    if (isPassOption(resp.answer)) agg[cat].pass++;
+  });
+  return Object.keys(agg)
+    .map(cat => ({ category: cat, percent: Math.round((agg[cat].pass / agg[cat].total) * 100), total: agg[cat].total }))
+    .sort((a, b) => a.percent - b.percent);
+}
+
+function computeDayOfWeekStats(completedRuns) {
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const agg = dayNames.map(d => ({ day: d, pass: 0, total: 0, count: 0 }));
+  const seenRunsPerDay = dayNames.map(() => new Set());
+  scoreableResponses(completedRuns).forEach(({ run, resp }) => {
+    const d = new Date(run.date + 'T00:00:00');
+    if (isNaN(d.getTime())) return;
+    const dow = d.getDay();
+    agg[dow].total++;
+    if (isPassOption(resp.answer)) agg[dow].pass++;
+    seenRunsPerDay[dow].add(run.id);
+  });
+  return agg.map((a, i) => ({
+    day: a.day,
+    percent: a.total ? Math.round((a.pass / a.total) * 100) : null,
+    count: seenRunsPerDay[i].size
+  }));
+}
+
+function computeTrendSeries(completedRuns) {
+  return completedRuns
+    .slice()
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .map(r => ({ date: r.date, percent: r.score.percent, label: fmtDate(r.date) }));
+}
+
+function computeTopOpportunities(completedRuns, limit) {
+  const agg = {};
+  scoreableResponses(completedRuns).forEach(({ resp }) => {
+    const key = resp.code;
+    if (!agg[key]) agg[key] = { code: resp.code, text: resp.text, severity: resp.severity, fails: 0, total: 0 };
+    agg[key].total++;
+    if (isFailOption(resp.answer)) agg[key].fails++;
+  });
+  return Object.values(agg)
+    .filter(x => x.fails > 0)
+    .map(x => ({ ...x, rate: Math.round((x.fails / x.total) * 100) }))
+    .sort((a, b) => b.fails - a.fails || b.rate - a.rate)
+    .slice(0, limit || 8);
+}
+
+function ringHTML(label, percent, sublabel, size) {
+  size = size || 108;
+  const stroke = 9;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(100, percent));
+  const offset = c * (1 - pct / 100);
+  const color = pct >= 90 ? 'var(--safe)' : pct >= 75 ? 'var(--medium)' : 'var(--danger)';
+  return `
+    <div class="ring-card">
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+        <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${stroke}" />
+        <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+          stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${offset.toFixed(1)}" stroke-linecap="round"
+          transform="rotate(-90 ${size / 2} ${size / 2})" />
+        <text x="50%" y="50%" text-anchor="middle" dominant-baseline="central" class="ring-pct">${pct}%</text>
+      </svg>
+      <div class="ring-label">${esc(label)}</div>
+      ${sublabel ? `<div class="ring-sublabel">${esc(sublabel)}</div>` : ''}
+    </div>
+  `;
+}
+
+function trendDeltaHTML(series) {
+  if (series.length < 4) return '';
+  const mid = Math.floor(series.length / 2);
+  const avg = arr => Math.round(arr.reduce((s, p) => s + p.percent, 0) / arr.length);
+  const a = avg(series.slice(0, mid));
+  const b = avg(series.slice(mid));
+  const delta = b - a;
+  if (delta === 0) return `<div class="trend-delta trend-flat">Holding steady around ${b}%</div>`;
+  const up = delta > 0;
+  return `<div class="trend-delta ${up ? 'trend-up' : 'trend-down'}">${up ? '&#9650;' : '&#9660;'} ${Math.abs(delta)} point${Math.abs(delta) === 1 ? '' : 's'} ${up ? 'better' : 'worse'} in the more recent half of this range</div>`;
+}
+
+function dowSummaryHTML(dowStats) {
+  const withData = dowStats.filter(d => d.percent != null && d.count > 0);
+  if (withData.length < 2) return '';
+  const worst = withData.slice().sort((a, b) => a.percent - b.percent)[0];
+  const best = withData.slice().sort((a, b) => b.percent - a.percent)[0];
+  if (worst.day === best.day) return '';
+  return `<p class="dow-summary"><strong>${esc(worst.day)}</strong> has the most opportunity right now, averaging ${worst.percent}% across ${worst.count} assessment${worst.count === 1 ? '' : 's'} &mdash; <strong>${esc(best.day)}</strong> performs best at ${best.percent}%.</p>`;
+}
+
+function topOpportunitiesHTML(list) {
+  if (!list.length) return emptyStateHTML('No failed items in this range \u2014 nice work.');
+  return `
+    <ul class="q-list">
+      ${list.map(o => `
+        <li class="q-row">
+          <div class="q-main">
+            <div class="q-card-badge-row">${badgeHTML(o.severity)} <span class="q-code">${esc(o.code)}</span></div>
+            <div class="q-text">${esc(o.text)}</div>
+          </div>
+          <span class="pill-outline">${o.fails}&times; failed &middot; ${o.rate}% fail rate</span>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
+let reportChartInstances = [];
+function initReportCharts() {
+  reportChartInstances.forEach(c => c.destroy());
+  reportChartInstances = [];
+  if (typeof Chart === 'undefined') return;
+
+  const trendSeries = window.__reportsTrendSeries || [];
+  const dowStats = window.__reportsDowStats || [];
+
+  const trendCanvas = document.getElementById('trendChart');
+  if (trendCanvas && trendSeries.length > 1) {
+    reportChartInstances.push(new Chart(trendCanvas, {
+      type: 'line',
+      data: {
+        labels: trendSeries.map(p => p.label),
+        datasets: [{
+          label: 'Score %',
+          data: trendSeries.map(p => p.percent),
+          borderColor: '#1a3c6e',
+          backgroundColor: 'rgba(26,60,110,0.08)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: trendSeries.map(p => p.percent >= 90 ? '#2f8a56' : p.percent >= 75 ? '#f0883e' : '#d43d3d')
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { min: 0, max: 100, ticks: { callback: v => v + '%' } } },
+        plugins: { legend: { display: false } }
+      }
+    }));
+  }
+
+  const dowCanvas = document.getElementById('dowChart');
+  if (dowCanvas && dowStats.length) {
+    reportChartInstances.push(new Chart(dowCanvas, {
+      type: 'bar',
+      data: {
+        labels: dowStats.map(d => d.day),
+        datasets: [{
+          label: 'Avg score %',
+          data: dowStats.map(d => d.percent),
+          backgroundColor: dowStats.map(d => d.percent == null ? '#e2e4e9' : d.percent >= 90 ? '#2f8a56' : d.percent >= 75 ? '#f0883e' : '#d43d3d')
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { min: 0, max: 100, ticks: { callback: v => v + '%' } } },
+        plugins: { legend: { display: false } }
+      }
+    }));
+  }
+}
 
 function renderReports() {
   return `
@@ -1259,8 +1463,51 @@ function buildReportsBodyHTML(search, locFilter, statusFilter) {
   `;
 
   if (filtered.length === 0) {
+    window.__reportsTrendSeries = [];
+    window.__reportsDowStats = [];
     html += emptyStateHTML('No assessments match your filters.');
     return html;
+  }
+
+  if (completed.length < 2) {
+    window.__reportsTrendSeries = [];
+    window.__reportsDowStats = [];
+    html += emptyStateHTML('Trends and category breakdowns will show up here once there are a couple more completed assessments in this range.');
+  } else {
+    const catStats = computeCategoryStats(completed);
+    const trendSeries = computeTrendSeries(completed);
+    const dowStats = computeDayOfWeekStats(completed);
+    const topOpportunities = computeTopOpportunities(completed, 8);
+    window.__reportsTrendSeries = trendSeries;
+    window.__reportsDowStats = dowStats;
+
+    html += `
+      <section class="panel">
+        <h3>Category performance</h3>
+        <div class="ring-row">
+          ${catStats.map(c => ringHTML(c.category, c.percent, c.total + ' checks', 100)).join('')}
+        </div>
+      </section>
+
+      <div class="two-col">
+        <section class="panel">
+          <h3>Score trend</h3>
+          <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+          ${trendDeltaHTML(trendSeries)}
+        </section>
+        <section class="panel">
+          <h3>Opportunity by day of week</h3>
+          <div class="chart-wrap"><canvas id="dowChart"></canvas></div>
+          ${dowSummaryHTML(dowStats)}
+        </section>
+      </div>
+
+      <section class="panel">
+        <h3>Top opportunities</h3>
+        <p style="color:var(--ink-soft);font-size:.82rem;margin:0 0 10px;">The questions failing most often across the assessments shown above.</p>
+        ${topOpportunitiesHTML(topOpportunities)}
+      </section>
+    `;
   }
 
   html += `
@@ -1291,6 +1538,7 @@ window.__repFilter = function () {
   const loc = document.getElementById('repLocFilter').value;
   const status = document.getElementById('repStatusFilter').value;
   document.getElementById('repBody').innerHTML = buildReportsBodyHTML(search, loc, status);
+  initReportCharts();
 };
 
 function renderRunDetail() {
@@ -1436,8 +1684,8 @@ function childEditorHTML(child, idx) {
         <span class="pill-outline">${esc(child.id || 'new sub-question')}</span>
         <button type="button" class="icon-btn" data-action="remove-child" data-index="${idx}">&times;</button>
       </div>
-      <label class="field-label">Sub-question code</label>
-      <input class="child-id" value="${esc(child.id || '')}" placeholder="e.g. SDC.999.a" />
+      <label class="field-label">Sub-question code (optional)</label>
+      <input class="child-id" value="${esc(child.id || '')}" placeholder="e.g. SDC.999.a &mdash; leave blank to auto-generate" />
       <label class="field-label">Text</label>
       <textarea class="child-text" rows="2">${esc(child.text || '')}</textarea>
       <label class="field-label">Guidance (optional)</label>
@@ -1461,7 +1709,14 @@ function syncQuestionDraftFromDom() {
   const optsEl = document.getElementById('qOptions');
   const idEl = document.getElementById('qId');
   if (idEl) qDraft.id = idEl.value.trim();
-  if (catEl) qDraft.category = catEl.value;
+  if (catEl) {
+    if (catEl.value === '__new__') {
+      const newCatEl = document.getElementById('qNewCategoryInput');
+      qDraft.category = newCatEl ? newCatEl.value.trim() : '';
+    } else {
+      qDraft.category = catEl.value;
+    }
+  }
   if (sevEl) qDraft.severity = sevEl.value;
   if (textEl) qDraft.text = textEl.value;
   if (guidanceEl) qDraft.guidance = guidanceEl.value;
@@ -1495,6 +1750,12 @@ function readLinksEditor(scope) {
 }
 
 
+window.__toggleNewCategoryInput = function () {
+  const sel = document.getElementById('qCategory');
+  const inp = document.getElementById('qNewCategoryInput');
+  if (inp && sel) inp.style.display = sel.value === '__new__' ? 'block' : 'none';
+};
+
 function questionModalHTML() {
   const isNew = state.editingQuestion === 'new';
   const q = qDraft;
@@ -1503,12 +1764,14 @@ function questionModalHTML() {
       <div class="modal question-modal">
         <div class="modal-header"><h3>${isNew ? 'Add a question' : 'Edit question'}</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
         <div class="modal-body">
-          <label class="field-label">Question code</label>
-          <input id="qId" value="${esc(q.id)}" placeholder="e.g. SDC.999" ${isNew ? '' : 'readonly'} />
+          <label class="field-label">Question code (optional)</label>
+          <input id="qId" value="${esc(q.id)}" placeholder="e.g. SDC.999 &mdash; leave blank to auto-generate" ${isNew ? '' : 'readonly'} />
           <label class="field-label">Category</label>
-          <select id="qCategory">
+          <select id="qCategory" onchange="window.__toggleNewCategoryInput()">
             ${state.categories.map(c => `<option value="${esc(c)}" ${q.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+            <option value="__new__">+ New category&hellip;</option>
           </select>
+          <input id="qNewCategoryInput" type="text" placeholder="New category name" style="display:none;margin-top:6px;" />
           <label class="field-label">Severity</label>
           <select id="qSeverity">
             ${['IMMEDIATE', 'HIGH', 'MEDIUM', 'LOW'].map(s => `<option value="${s}" ${q.severity === s ? 'selected' : ''}>${s}</option>`).join('')}
@@ -1572,9 +1835,13 @@ function render() {
     return;
   }
   if (state.view === 'dashboard') {
-    main.innerHTML = (!state.isAdmin && !state.selectedLocationId) ? renderLocationGate() : renderDashboard();
+    main.innerHTML = renderDashboard();
   }
   else if (state.view === 'take') {
+    if (!state.selectedLocationId && !state.draftRun && state.locations.length === 1) {
+      state.selectedLocationId = state.locations[0].id;
+      state.selectedLocationName = state.locations[0].name;
+    }
     main.innerHTML = (!state.selectedLocationId && !state.draftRun) ? renderLocationGate() : renderTake();
   }
   else if (state.view === 'reports') main.innerHTML = state.isAdmin ? renderReports() : renderDashboard();
@@ -1583,6 +1850,9 @@ function render() {
   renderModal();
   if (state.view === 'settings' && state.isAdmin && state.settingsTab === 'templates' && state.editingTemplate && state.templateEditorTab === 'arrange') {
     initArrangeSortables();
+  }
+  if (state.view === 'reports' && state.isAdmin) {
+    initReportCharts();
   }
 }
 
@@ -1642,15 +1912,6 @@ async function handleClickAction(t, e) {
     if (!loc) return;
     state.selectedLocationId = loc.id;
     state.selectedLocationName = loc.name;
-    saveSelectedLocation(loc.id, loc.name);
-    render();
-    return;
-  }
-  if (action === 'change-location') {
-    if (state.draftRun && !confirm('You have an assessment in progress. Changing location will not affect it, but you will need to pick a location again for future assessments. Continue?')) return;
-    state.selectedLocationId = null;
-    state.selectedLocationName = null;
-    clearSelectedLocation();
     render();
     return;
   }
@@ -1734,15 +1995,23 @@ async function handleClickAction(t, e) {
   }
   if (action === 'save-question') {
     syncQuestionDraftFromDom();
-    if (!qDraft.id) { alert('Please enter a question code.'); return; }
+    const isNewQuestion = state.editingQuestion === 'new';
+    if (!qDraft.id) qDraft.id = uid('q');
     if (!qDraft.category || !qDraft.text.trim()) { alert('Category and question text are required.'); return; }
-    if (state.editingQuestion === 'new' && state.questions.some(q => q.id === qDraft.id)) {
+    if (isNewQuestion && state.questions.some(q => q.id === qDraft.id)) {
       alert('A question with that code already exists. Use a different code or edit the existing one.');
       return;
     }
-    const missingChildId = (qDraft.children || []).find(c => !c.id.trim());
-    if (missingChildId) { alert('Every sub-question needs a code.'); return; }
+    if (!state.categories.includes(qDraft.category)) {
+      await saveCategoriesToDb([...state.categories, qDraft.category]);
+    }
+    (qDraft.children || []).forEach((c, i) => {
+      if (!c.id || !c.id.trim()) c.id = qDraft.id + '.' + String.fromCharCode(97 + i);
+    });
     await saveQuestionToDb(qDraft);
+    if (isNewQuestion && state.editingTemplate) {
+      window.__templateSelection.add(qDraft.id);
+    }
     state.editingQuestion = null; qDraft = null; renderModal();
     return;
   }
@@ -1833,6 +2102,22 @@ async function handleClickAction(t, e) {
   if (action === 'delete-location') {
     if (!confirm('Delete this location?')) return;
     await deleteLocationFromDb(id);
+    return;
+  }
+  if (action === 'add-category') {
+    const input = document.getElementById('newCategoryInput');
+    const name = input ? input.value.trim() : '';
+    if (!name) { alert('Enter a category name.'); return; }
+    if (state.categories.includes(name)) { alert('That category already exists.'); return; }
+    await saveCategoriesToDb([...state.categories, name]);
+    return;
+  }
+  if (action === 'delete-category') {
+    const name = t.getAttribute('data-name');
+    const inUse = state.questions.some(q => q.category === name);
+    if (inUse) { alert('This category is still used by one or more questions \u2014 move or delete those first.'); return; }
+    if (!confirm('Delete the "' + name + '" category?')) return;
+    await saveCategoriesToDb(state.categories.filter(c => c !== name));
     return;
   }
   if (action === 'save-location') {
@@ -2024,8 +2309,5 @@ document.getElementById('sidebarBackdrop').addEventListener('click', () => {
 subscribeQuestions();
 subscribeTemplates();
 subscribeLocations();
-(function initLocation() {
-  const saved = loadSelectedLocation();
-  if (saved) { state.selectedLocationId = saved.id; state.selectedLocationName = saved.name; }
-})();
+subscribeCategories();
 render();
