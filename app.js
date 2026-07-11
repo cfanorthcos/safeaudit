@@ -6,6 +6,9 @@ import {
 import {
   getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+import {
+  getStorage, ref, uploadBytes, getDownloadURL, deleteObject
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-storage.js";
 
 /* =========================================================================
    FIREBASE INIT
@@ -14,6 +17,7 @@ import {
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const db = getFirestore(fbApp);
 const auth = getAuth(fbApp);
+const storage = getStorage(fbApp);
 const ADMIN_EMAIL = window.ADMIN_EMAIL;
 
 /* =========================================================================
@@ -246,7 +250,12 @@ async function saveQuestionToDb(q) {
   await setDoc(doc(db, 'questions', q.id), sanitizeForFirestore(q));
 }
 async function deleteQuestionFromDb(id) {
+  const q = state.questions.find(x => x.id === id);
   await deleteDoc(doc(db, 'questions', id));
+  if (q) {
+    const allPhotos = [...(q.photos || []), ...((q.children || []).flatMap(c => c.photos || []))];
+    allPhotos.forEach(p => deletePhotoFromStorage(p.path));
+  }
   // also strip from any templates referencing it (both the flat list and any sections)
   const updates = state.templates.filter(t => (t.questionIds || []).includes(id));
   for (const t of updates) {
@@ -282,6 +291,49 @@ async function submitRunToDb(run) {
   await addDoc(collection(db, 'runs'), rest);
 }
 async function deleteRunFromDb(id) { await deleteDoc(doc(db, 'runs', id)); }
+
+/* ---- Photo upload (reference photos on questions) ---- */
+
+function resizeImageFile(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    if (!file.type || !file.type.startsWith('image/')) { reject(new Error('That file is not an image.')); return; }
+    if (file.size > 25 * 1024 * 1024) { reject(new Error('That image is too large (25MB max before resizing).')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the file.'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Could not read that image.'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) { height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        canvas.toBlob(blob => {
+          if (blob) resolve(blob); else reject(new Error('Could not process that image.'));
+        }, 'image/jpeg', 0.87);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadQuestionPhoto(file, scopeKey) {
+  const blob = await resizeImageFile(file, 1600);
+  const path = 'question-photos/' + scopeKey + '/' + uid('photo') + '.jpg';
+  await uploadBytes(ref(storage, path), blob, { contentType: 'image/jpeg' });
+  const url = await getDownloadURL(ref(storage, path));
+  return { url, path };
+}
+
+function deletePhotoFromStorage(path) {
+  if (!path) return Promise.resolve();
+  return deleteObject(ref(storage, path)).catch(err => console.error('Failed to delete photo from storage', err));
+}
 
 /* =========================================================================
    AUTH
@@ -1369,12 +1421,11 @@ function photosEditorHTML(photos, scope) {
           <button type="button" class="icon-btn photo-remove" data-action="remove-photo" data-scope="${scope}" data-index="${i}" title="Remove photo">&times;</button>
         </div>
       `).join('')}
+      <label class="photo-add-btn">
+        <span id="photo-status-${scope}">+ Add photo</span>
+        <input type="file" accept="image/*" class="photo-file-input" data-scope="${scope}" style="display:none;" />
+      </label>
     </div>
-    <div class="photo-add-row">
-      <input type="text" class="photo-path-input" data-scope="${scope}" placeholder="photos/scoop-handles.jpg" />
-      <button type="button" class="btn btn-ghost btn-sm" data-action="add-photo-path" data-scope="${scope}">+ Add photo</button>
-    </div>
-    <p class="photo-hint">Upload the image file to a <code>photos/</code> folder in your GitHub repo first, then paste its filename here (e.g. <code>photos/scoop-handles.jpg</code>).</p>
   `;
 }
 
@@ -1548,6 +1599,29 @@ document.addEventListener('input', (e) => {
   refreshItemState(code);
 });
 
+document.addEventListener('change', async (e) => {
+  const fileInput = e.target.closest('.photo-file-input');
+  if (!fileInput) return;
+  const file = fileInput.files[0];
+  if (!file) return;
+  const scope = fileInput.getAttribute('data-scope');
+  const statusEl = document.getElementById('photo-status-' + scope);
+  if (statusEl) statusEl.textContent = 'Uploading\u2026';
+  try {
+    syncQuestionDraftFromDom();
+    const scopeKey = (qDraft.id || 'new') + '-' + scope;
+    const photo = await uploadQuestionPhoto(file, scopeKey);
+    const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
+    target.photos = target.photos || [];
+    target.photos.push(photo);
+    renderModal();
+  } catch (err) {
+    console.error('Photo upload failed', err);
+    alert('Photo upload failed: ' + (err && err.message ? err.message : err));
+    if (statusEl) statusEl.textContent = '+ Add photo';
+  }
+});
+
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('[data-action]');
   if (!t) return;
@@ -1639,19 +1713,9 @@ async function handleClickAction(t, e) {
     syncQuestionDraftFromDom();
     const scope = t.getAttribute('data-scope');
     const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
-    target.photos.splice(parseInt(t.getAttribute('data-index'), 10), 1);
-    renderModal();
-    return;
-  }
-  if (action === 'add-photo-path') {
-    syncQuestionDraftFromDom();
-    const scope = t.getAttribute('data-scope');
-    const input = document.querySelector('.photo-path-input[data-scope="' + scope + '"]');
-    const value = input ? input.value.trim() : '';
-    if (!value) { alert('Enter the filename or path you uploaded to your photos/ folder.'); return; }
-    const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
-    target.photos = target.photos || [];
-    target.photos.push({ url: value });
+    const idx = parseInt(t.getAttribute('data-index'), 10);
+    const [removed] = target.photos.splice(idx, 1);
+    if (removed) deletePhotoFromStorage(removed.path);
     renderModal();
     return;
   }
@@ -1663,7 +1727,8 @@ async function handleClickAction(t, e) {
   }
   if (action === 'remove-child') {
     syncQuestionDraftFromDom();
-    qDraft.children.splice(parseInt(t.getAttribute('data-index'), 10), 1);
+    const [removed] = qDraft.children.splice(parseInt(t.getAttribute('data-index'), 10), 1);
+    if (removed && removed.photos) removed.photos.forEach(p => deletePhotoFromStorage(p.path));
     renderModal();
     return;
   }
