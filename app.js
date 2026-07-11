@@ -211,7 +211,11 @@ function subscribeLocations() {
     }
 
     render();
-  }, err => console.error('locations listener error', err));
+  }, err => {
+    console.error('locations listener error', err);
+    state.locationsLoaded = true;
+    render();
+  });
 }
 let runsUnsub = null;
 function subscribeRunsIfAdmin() {
