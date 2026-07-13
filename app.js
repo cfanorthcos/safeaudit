@@ -680,6 +680,7 @@ function renderTakeInProgress() {
   const total = run.responses.length;
   const pct = total ? Math.round((answered / total) * 100) : 0;
   const incompleteCount = total - answered;
+  const nameMissing = state.takeValidationAttempted && (!run.assessorName || !run.assessorName.trim());
 
   const bySection = {};
   run.responses.forEach(r => { (bySection[r.sectionName || r.category] = bySection[r.sectionName || r.category] || []).push(r); });
@@ -694,8 +695,8 @@ function renderTakeInProgress() {
         <input value="${esc(run.locationName || 'Not set')}" disabled />
       </div>
       <div class="meta-field">
-        <label>Assessor</label>
-        <input id="metaAssessor" value="${esc(run.assessorName)}" placeholder="Your name" />
+        <label>Assessor (required)</label>
+        <input id="metaAssessor" class="${nameMissing ? 'field-error' : ''}" value="${esc(run.assessorName)}" placeholder="Your name" />
       </div>
       <div class="meta-field">
         <label>Date</label>
@@ -706,19 +707,31 @@ function renderTakeInProgress() {
     <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:${pct}%"></div></div>
     <div class="progress-label" id="progressLabel">${answered} of ${total} complete</div>
 
-    ${state.takeValidationAttempted && incompleteCount > 0 ? `
+    ${state.takeValidationAttempted && (incompleteCount > 0 || nameMissing) ? `
       <div class="callout callout-danger" id="submitWarning">
-        <span>&#9888;</span> ${incompleteCount} question${incompleteCount > 1 ? 's' : ''} still need${incompleteCount > 1 ? '' : 's'} attention &mdash; highlighted below.
+        <span>&#9888;</span> ${nameMissing ? 'Assessor name is required' : ''}${nameMissing && incompleteCount > 0 ? ' and ' : ''}${incompleteCount > 0 ? incompleteCount + ' question' + (incompleteCount > 1 ? 's' : '') + ' still need' + (incompleteCount > 1 ? '' : 's') + ' attention' : ''} &mdash; highlighted below.
       </div>
     ` : ''}
 
-    ${Object.keys(bySection).map(sec => `
-      <section class="panel">
-        <h3>${esc(sec)}</h3>
-        ${groupByParent(bySection[sec]).map(g => renderTakeGroup(g)).join('')}
-        ${sectionFlagsHTML(sec, run)}
-      </section>
-    `).join('')}
+    ${Object.keys(bySection).map(sec => {
+      const items = bySection[sec];
+      const done = items.filter(isItemComplete).length;
+      const sectionTotal = items.length;
+      const sectionComplete = done === sectionTotal;
+      return `
+        <details class="panel section-panel" open>
+          <summary class="section-panel-head">
+            <h3 style="margin:0;">${esc(sec)}</h3>
+            <span class="section-status ${sectionComplete ? 'section-status-complete' : ''}">${sectionComplete ? '&#10003; Complete' : done + ' of ' + sectionTotal}</span>
+            <span class="chev">&#9662;</span>
+          </summary>
+          <div class="section-panel-body">
+            ${groupByParent(items).map(g => renderTakeGroup(g)).join('')}
+            ${sectionFlagsHTML(sec, run)}
+          </div>
+        </details>
+      `;
+    }).join('')}
 
     <div class="sticky-footer">
       <button class="btn btn-ghost" data-action="save-draft">Save draft</button>
@@ -2998,11 +3011,12 @@ async function handleClickAction(t, e) {
   if (action === 'submit-run') {
     syncMetaFromDom();
     const incomplete = state.draftRun.responses.filter(r => !isItemComplete(r));
-    if (incomplete.length > 0) {
+    const nameMissing = !state.draftRun.assessorName || !state.draftRun.assessorName.trim();
+    if (incomplete.length > 0 || nameMissing) {
       state.takeValidationAttempted = true;
       render();
       setTimeout(() => {
-        const first = document.querySelector('.missing');
+        const first = document.querySelector('.field-error, .missing');
         if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
       return;
