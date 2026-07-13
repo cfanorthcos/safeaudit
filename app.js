@@ -1729,7 +1729,7 @@ function buildReportsBodyHTML(search, locFilter, statusFilter, dateFrom, dateTo)
       <section class="panel rating-panel">
         ${safeRatingGaugeHTML(ratingInfo.rating, 170)}
         <div class="rating-details">
-          <h3>SAFE Audit Rating</h3>
+          <h3>SAFE Audit Rating (Estimate) </h3>
           <p>${ratingReasonHTML(ratingInfo)}</p>
         </div>
       </section>
