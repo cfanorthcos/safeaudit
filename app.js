@@ -1192,6 +1192,7 @@ function buildTemplateSelectHTML(search, catFilter, sevFilter) {
                 <div class="q-card-badge-row">${badgeHTML(q.severity)} <span class="q-code">${esc(q.id)}</span></div>
                 <div class="q-text">${esc(q.text)}</div>
               </div>
+              <button type="button" class="icon-btn" data-action="edit-question" data-id="${esc(q.id)}" title="Edit question">&#9998;</button>
             </li>
           `).join('')}
         </ul>
@@ -1267,6 +1268,7 @@ function renderSectionBlock(s) {
               ${badgeHTML(q.severity)}
               <span class="q-code">${esc(qid)}</span>
               <span class="arrange-text">${esc(q.text)}</span>
+              <button type="button" class="icon-btn" data-action="edit-question" data-id="${esc(qid)}" title="Edit question">&#9998;</button>
             </li>
           `;
         }).join('')}
@@ -2132,6 +2134,10 @@ async function performQuestionSave() {
     if (!c.id || !c.id.trim()) c.id = qDraft.id + '.' + String.fromCharCode(97 + i);
   });
   await saveQuestionToDb(qDraft);
+  const savedCopy = JSON.parse(JSON.stringify(qDraft));
+  const existingIdx = state.questions.findIndex(q => q.id === savedCopy.id);
+  if (existingIdx >= 0) state.questions[existingIdx] = savedCopy;
+  else state.questions.push(savedCopy);
   if (isNewQuestion && state.editingTemplate) {
     window.__templateSelection.add(qDraft.id);
     if (state.pendingSectionForNewQuestion) {
@@ -2416,7 +2422,6 @@ async function handleClickAction(t, e) {
     return;
   }
   if (action === 'save-question' || action === 'save-question-and-add-another') {
-    const wasTargetingSection = !!state.pendingSectionForNewQuestion;
     const savedId = await performQuestionSave();
     if (!savedId) return; // validation failed, alert already shown
 
@@ -2433,8 +2438,7 @@ async function handleClickAction(t, e) {
     } else {
       state.editingQuestion = null; qDraft = null;
       state.pendingSectionForNewQuestion = null;
-      if (wasTargetingSection) renderKeepingScroll();
-      else renderModal();
+      renderKeepingScroll();
     }
     return;
   }
@@ -2515,7 +2519,8 @@ async function handleClickAction(t, e) {
       li.className = 'arrange-row';
       li.setAttribute('data-qid', qid);
       li.innerHTML = '<span class="drag-handle">&#8942;&#8942;</span>' + badgeHTML(q.severity) +
-        ' <span class="q-code">' + esc(qid) + '</span><span class="arrange-text">' + esc(q.text) + '</span>';
+        ' <span class="q-code">' + esc(qid) + '</span><span class="arrange-text">' + esc(q.text) + '</span>' +
+        '<button type="button" class="icon-btn" data-action="edit-question" data-id="' + esc(qid) + '" title="Edit question">&#9998;</button>';
       ul.appendChild(li);
     }
     const input = document.querySelector('.section-add-search[data-section-id="' + sectionId + '"]');
