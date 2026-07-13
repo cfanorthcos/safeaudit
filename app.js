@@ -46,8 +46,9 @@ const state = {
   selectedLocationName: null,
   takeStage: 'filling',          // 'filling' | 'review'
   takeValidationAttempted: false,
-  templateEditorTab: 'select',
-  showingLightbox: false
+  templateEditorTab: 'arrange',
+  showingLightbox: false,
+  pendingSectionForNewQuestion: null
 };
 
 /* =========================================================================
@@ -997,7 +998,7 @@ function renderLibraryTab() {
   return `
     <div class="filter-bar">
       <div class="search-box">
-        <input id="libSearch" placeholder="Search questions&hellip;" oninput="window.__libFilter()" />
+        <input id="libSearch" placeholder="Search by text or code&hellip;" oninput="window.__libFilter()" />
       </div>
       <select id="libCatFilter" onchange="window.__libFilter()">
         <option value="all">All categories</option>
@@ -1022,7 +1023,7 @@ function buildLibraryListHTML(search, catFilter, sevFilter) {
     if (catFilter !== 'all' && q.category !== catFilter) return false;
     if (sevFilter !== 'all' && q.severity !== sevFilter) return false;
     if (s) {
-      const hay = (q.text + ' ' + (q.guidance || '') + ' ' + (q.children || []).map(c => c.text).join(' ')).toLowerCase();
+      const hay = (q.id + ' ' + q.text + ' ' + (q.guidance || '') + ' ' + (q.children || []).map(c => c.id + ' ' + c.text).join(' ')).toLowerCase();
       if (!hay.includes(s)) return false;
     }
     return true;
@@ -1128,8 +1129,8 @@ function renderTemplateEditor() {
       </div>
     </div>
     <div class="filter-bar">
-      <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">1. Choose questions</button>
-      <button class="btn ${state.templateEditorTab === 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="arrange">2. Arrange order</button>
+      <button class="btn ${state.templateEditorTab === 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="arrange">1. Arrange questions</button>
+      <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">2. Bulk select by category</button>
       <div class="pill-outline" id="tplSelCount" style="margin-left:auto;">${window.__templateSelection.size} selected</div>
     </div>
     <div id="templateEditorBody">
@@ -1145,7 +1146,7 @@ function renderTemplateEditor() {
 function renderSelectTab() {
   return `
     <div class="filter-bar">
-      <div class="search-box"><input id="tplSearch" placeholder="Search questions&hellip;" oninput="window.__tplFilter()" /></div>
+      <div class="search-box"><input id="tplSearch" placeholder="Search by text or code&hellip;" oninput="window.__tplFilter()" /></div>
       <select id="tplCatFilter" onchange="window.__tplFilter()">
         <option value="all">All categories</option>
         ${state.categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
@@ -1168,7 +1169,7 @@ function buildTemplateSelectHTML(search, catFilter, sevFilter) {
   const filtered = state.questions.filter(q => {
     if (catFilter !== 'all' && q.category !== catFilter) return false;
     if (sevFilter && sevFilter !== 'all' && q.severity !== sevFilter) return false;
-    if (s && !q.text.toLowerCase().includes(s)) return false;
+    if (s && !(q.id.toLowerCase().includes(s) || q.text.toLowerCase().includes(s))) return false;
     return true;
   });
   const byCat = {};
@@ -1270,6 +1271,13 @@ function renderSectionBlock(s) {
           `;
         }).join('')}
       </ul>
+      <div class="section-add">
+        <div class="search-box section-add-search-box">
+          <input type="text" class="section-add-search" data-section-id="${esc(s.id)}" placeholder="Search by text or code to add&hellip;" oninput="window.__sectionSearch('${esc(s.id)}')" />
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" data-action="new-question-for-section" data-section-id="${esc(s.id)}">+ New question</button>
+        <div class="section-add-results" id="section-add-results-${esc(s.id)}"></div>
+      </div>
     </div>
   `;
 }
@@ -1956,6 +1964,12 @@ function rerenderModalKeepingScroll(scrollToSelector) {
   });
 }
 
+function renderKeepingScroll() {
+  const prevScroll = window.scrollY;
+  render();
+  requestAnimationFrame(() => { window.scrollTo(0, prevScroll); });
+}
+
 function renderModal() {
   if (state.showingSlackAnim || state.showingLightbox) return;
   const root = document.getElementById('modalRoot');
@@ -2102,6 +2116,33 @@ function readLinksEditor(scope) {
   return links;
 }
 
+async function performQuestionSave() {
+  syncQuestionDraftFromDom();
+  const isNewQuestion = state.editingQuestion === 'new';
+  if (!qDraft.id) qDraft.id = uid('q');
+  if (!qDraft.category || !qDraft.text.trim()) { alert('Category and question text are required.'); return null; }
+  if (isNewQuestion && state.questions.some(q => q.id === qDraft.id)) {
+    alert('A question with that code already exists. Use a different code or edit the existing one.');
+    return null;
+  }
+  if (!state.categories.includes(qDraft.category)) {
+    await saveCategoriesToDb([...state.categories, qDraft.category]);
+  }
+  (qDraft.children || []).forEach((c, i) => {
+    if (!c.id || !c.id.trim()) c.id = qDraft.id + '.' + String.fromCharCode(97 + i);
+  });
+  await saveQuestionToDb(qDraft);
+  if (isNewQuestion && state.editingTemplate) {
+    window.__templateSelection.add(qDraft.id);
+    if (state.pendingSectionForNewQuestion) {
+      sectionsDraft = readSectionsFromDom();
+      const section = sectionsDraft.find(s => s.id === state.pendingSectionForNewQuestion);
+      if (section && !section.questionIds.includes(qDraft.id)) section.questionIds.push(qDraft.id);
+    }
+  }
+  return qDraft.id;
+}
+
 
 window.__toggleNewCategoryInput = function () {
   const sel = document.getElementById('qCategory');
@@ -2113,6 +2154,26 @@ window.__toggleTplAvailability = function () {
   const specific = document.getElementById('tplAvailSpecific').checked;
   const box = document.getElementById('tplLocationCheckboxes');
   if (box) box.style.display = specific ? 'block' : 'none';
+};
+
+window.__sectionSearch = function (sectionId) {
+  const input = document.querySelector('.section-add-search[data-section-id="' + sectionId + '"]');
+  const resultsEl = document.getElementById('section-add-results-' + sectionId);
+  if (!input || !resultsEl) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { resultsEl.innerHTML = ''; return; }
+  const currentSections = readSectionsFromDom();
+  const alreadyIn = new Set(currentSections.flatMap(s => s.questionIds));
+  const matches = state.questions
+    .filter(qq => !alreadyIn.has(qq.id) && (qq.id.toLowerCase().includes(q) || qq.text.toLowerCase().includes(q)))
+    .slice(0, 8);
+  resultsEl.innerHTML = matches.length
+    ? matches.map(m => `
+        <div class="section-add-result" data-action="add-question-to-section" data-section-id="${sectionId}" data-qid="${esc(m.id)}">
+          ${badgeHTML(m.severity)} <span class="q-code">${esc(m.id)}</span> ${esc(m.text)}
+        </div>
+      `).join('')
+    : '<div class="section-add-empty">No matches (or already added)</div>';
 };
 
 function questionModalHTML() {
@@ -2155,6 +2216,7 @@ function questionModalHTML() {
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost" data-action="close-modal">Cancel</button>
+          ${isNew ? `<button class="btn btn-ghost" data-action="save-question-and-add-another">Save &amp; add another</button>` : ''}
           <button class="btn btn-primary" data-action="save-question">Save question</button>
         </div>
       </div>
@@ -2287,6 +2349,7 @@ async function handleClickAction(t, e) {
   if (action === 'close-modal' || action === 'close-modal-overlay') {
     if (action === 'close-modal-overlay' && e.target !== t) return;
     state.showPasswordModal = false; state.editingQuestion = null; state.editingLocation = null; qDraft = null;
+    state.pendingSectionForNewQuestion = null;
     renderModal();
     return;
   }
@@ -2352,32 +2415,33 @@ async function handleClickAction(t, e) {
     rerenderModalKeepingScroll();
     return;
   }
-  if (action === 'save-question') {
-    syncQuestionDraftFromDom();
-    const isNewQuestion = state.editingQuestion === 'new';
-    if (!qDraft.id) qDraft.id = uid('q');
-    if (!qDraft.category || !qDraft.text.trim()) { alert('Category and question text are required.'); return; }
-    if (isNewQuestion && state.questions.some(q => q.id === qDraft.id)) {
-      alert('A question with that code already exists. Use a different code or edit the existing one.');
-      return;
+  if (action === 'save-question' || action === 'save-question-and-add-another') {
+    const wasTargetingSection = !!state.pendingSectionForNewQuestion;
+    const savedId = await performQuestionSave();
+    if (!savedId) return; // validation failed, alert already shown
+
+    if (action === 'save-question-and-add-another') {
+      const targetSection = state.pendingSectionForNewQuestion;
+      const lastCategory = qDraft.category;
+      const lastSeverity = qDraft.severity;
+      startQuestionEdit('new');
+      qDraft.category = lastCategory;
+      qDraft.severity = lastSeverity;
+      renderModal();
+      setTimeout(() => { const el = document.getElementById('qText'); if (el) el.focus(); }, 0);
+      state.pendingSectionForNewQuestion = targetSection; // keep targeting the same section for the next one
+    } else {
+      state.editingQuestion = null; qDraft = null;
+      state.pendingSectionForNewQuestion = null;
+      if (wasTargetingSection) renderKeepingScroll();
+      else renderModal();
     }
-    if (!state.categories.includes(qDraft.category)) {
-      await saveCategoriesToDb([...state.categories, qDraft.category]);
-    }
-    (qDraft.children || []).forEach((c, i) => {
-      if (!c.id || !c.id.trim()) c.id = qDraft.id + '.' + String.fromCharCode(97 + i);
-    });
-    await saveQuestionToDb(qDraft);
-    if (isNewQuestion && state.editingTemplate) {
-      window.__templateSelection.add(qDraft.id);
-    }
-    state.editingQuestion = null; qDraft = null; renderModal();
     return;
   }
 
   if (action === 'new-template') {
     state.editingTemplate = 'new';
-    state.templateEditorTab = 'select';
+    state.templateEditorTab = 'arrange';
     window.__templateSelection = new Set();
     sectionsDraft = [];
     render();
@@ -2386,7 +2450,7 @@ async function handleClickAction(t, e) {
   if (action === 'edit-template') {
     const tpl = state.templates.find(x => x.id === id);
     state.editingTemplate = tpl;
-    state.templateEditorTab = 'select';
+    state.templateEditorTab = 'arrange';
     window.__templateSelection = new Set(tpl.questionIds || []);
     sectionsDraft = tpl.sections ? JSON.parse(JSON.stringify(tpl.sections)) : [];
     render();
@@ -2437,6 +2501,36 @@ async function handleClickAction(t, e) {
     if (state.templateEditorTab === 'arrange') sectionsDraft = readSectionsFromDom();
     state.templateEditorTab = t.getAttribute('data-tab');
     render();
+    return;
+  }
+  if (action === 'add-question-to-section') {
+    const sectionId = t.getAttribute('data-section-id');
+    const qid = t.getAttribute('data-qid');
+    const q = state.questions.find(x => x.id === qid);
+    if (!q) return;
+    window.__templateSelection.add(qid);
+    const ul = document.querySelector('.section-questions[data-section-id="' + sectionId + '"]');
+    if (ul) {
+      const li = document.createElement('li');
+      li.className = 'arrange-row';
+      li.setAttribute('data-qid', qid);
+      li.innerHTML = '<span class="drag-handle">&#8942;&#8942;</span>' + badgeHTML(q.severity) +
+        ' <span class="q-code">' + esc(qid) + '</span><span class="arrange-text">' + esc(q.text) + '</span>';
+      ul.appendChild(li);
+    }
+    const input = document.querySelector('.section-add-search[data-section-id="' + sectionId + '"]');
+    const resultsEl = document.getElementById('section-add-results-' + sectionId);
+    if (input) input.value = '';
+    if (resultsEl) resultsEl.innerHTML = '';
+    const selCount = document.getElementById('tplSelCount');
+    if (selCount) selCount.textContent = window.__templateSelection.size + ' selected';
+    return;
+  }
+  if (action === 'new-question-for-section') {
+    state.pendingSectionForNewQuestion = t.getAttribute('data-section-id');
+    state.editingQuestion = 'new';
+    startQuestionEdit('new');
+    renderModal();
     return;
   }
   if (action === 'add-section') {
