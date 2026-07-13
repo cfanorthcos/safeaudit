@@ -35,6 +35,7 @@ const state = {
   locationsLoaded: false,
   runs: [],
   runsLoaded: false,
+  recentFailures: [],
   settingsTab: 'library',
   activeRunId: null,
   draftRun: null,
@@ -54,7 +55,46 @@ const state = {
 ========================================================================= */
 
 function uid(prefix) { return prefix + '_' + Math.random().toString(36).slice(2, 10); }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
+function localDateStr(d) {
+  // Local calendar date as YYYY-MM-DD — NOT toISOString(), which is UTC
+  // and can land on the wrong day depending on timezone and time of day.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+function todayISO() { return localDateStr(new Date()); }
+
+function subtractDays(dateStr, days) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() - days);
+  return localDateStr(d);
+}
+
+function ordinalSuffix(n) {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return 'th';
+  switch (n % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
+}
+
+function computeRepeatFlags(run, windowDays) {
+  windowDays = windowDays || 30;
+  const windowStart = subtractDays(run.date, windowDays);
+  const counts = {};
+  (state.recentFailures || []).forEach(f => {
+    if (f.locationId !== run.locationId) return;
+    if (f.runId === run.id) return;
+    if (f.date >= run.date) return;
+    if (f.date < windowStart) return;
+    counts[f.questionCode] = (counts[f.questionCode] || 0) + 1;
+  });
+  return counts;
+}
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -62,7 +102,14 @@ function esc(s) {
 }
 function fmtDate(iso) {
   if (!iso) return '\u2014';
-  const d = new Date(iso);
+  // Bare "YYYY-MM-DD" strings are parsed as UTC midnight by `new Date()`,
+  // which rolls back to the previous day once displayed in any timezone
+  // behind UTC. Forcing a local-time parse (only when there's no time
+  // component already) fixes that without touching real timestamps
+  // like draft createdAt, which already include a time + Z and should
+  // be interpreted as the exact instant they represent.
+  const hasTime = /T/.test(iso);
+  const d = new Date(hasTime ? iso : iso + 'T00:00:00');
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
@@ -213,6 +260,15 @@ async function saveCategoriesToDb(list) {
   await setDoc(doc(db, 'meta', 'categories'), sanitizeForFirestore({ list }));
 }
 
+function subscribeRecentFailures() {
+  onSnapshot(collection(db, 'recentFailures'), snap => {
+    const list = [];
+    snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+    state.recentFailures = list;
+    render();
+  }, err => console.error('recentFailures listener error', err));
+}
+
 let runsUnsub = null;
 function subscribeRunsIfAdmin() {
   if (runsUnsub) { runsUnsub(); runsUnsub = null; }
@@ -280,9 +336,21 @@ async function deleteLocationFromDb(id) { await deleteDoc(doc(db, 'locations', i
 
 async function submitRunToDb(run) {
   const { id, ...rest } = run;
-  await addDoc(collection(db, 'runs'), rest);
+  const ref = await addDoc(collection(db, 'runs'), rest);
+  return ref.id;
 }
 async function deleteRunFromDb(id) { await deleteDoc(doc(db, 'runs', id)); }
+
+function recordRecentFailures(run, runId, failedResponses) {
+  failedResponses.forEach(r => {
+    addDoc(collection(db, 'recentFailures'), sanitizeForFirestore({
+      locationId: run.locationId || '',
+      questionCode: r.code,
+      date: run.date,
+      runId: runId
+    })).catch(err => console.error('Failed to record recent-failure entry', err));
+  });
+}
 
 /* ---- Photo upload (reference photos on questions) ---- */
 
@@ -668,7 +736,7 @@ function renderTakeReview() {
           ${failed.map(r => `
             <li class="q-row">
               <div class="q-main" style="width:100%;">
-                <div class="q-card-badge-row">${badgeHTML(r.severity)} <span class="q-code">${esc(r.code)}</span></div>
+                <div class="q-card-badge-row">${badgeHTML(r.severity)} <span class="q-code">${esc(r.code)}</span> ${r.repeatCount > 0 ? `<span class="repeat-badge">&#128257; Repeat &mdash; ${r.repeatCount + 1}${ordinalSuffix(r.repeatCount + 1)} time in 30 days</span>` : ''}</div>
                 <div class="q-text">${esc(r.text)}</div>
                 <textarea class="review-note-textarea" data-code="${esc(r.code)}" rows="2" placeholder="Corrective action or notes&hellip;">${esc(r.notes || '')}</textarea>
               </div>
@@ -693,22 +761,18 @@ function renderTakeReview() {
 
 function buildSlackPayload(run, score) {
   const failed = run.responses.filter(r => isFailOption(r.answer));
-  const perfect = failed.length === 0;
-
-  const header = perfect
-    ? ':white_check_mark: *SAFE Assessment \u2014 ' + (run.locationName || 'Unknown location') + ' \u2014 Perfect score!*'
-    : ':rotating_light: *SAFE Assessment \u2014 ' + (run.locationName || 'Unknown location') + '*';
 
   const meta = 'Template: ' + run.templateName + '  |  Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date);
-  const scoreLine = 'Score: *' + score.grade + ' (' + score.percent + '%)*' + (score.criticalFails ? '  \u2014 :warning: ' + score.criticalFails + ' IMMEDIATE failure' + (score.criticalFails > 1 ? 's' : '') : '');
 
   const missedLines = failed.map(r =>
-    '\u2022 *[' + r.severity + ']* ' + r.code + ' \u2014 ' + r.text + (r.notes ? '\n   _note: ' + r.notes + '_' : '')
+    '\u2022 *[' + r.severity + ']* ' + r.text +
+    (r.repeatCount > 0 ? '  :repeat: _' + (r.repeatCount + 1) + ordinalSuffix(r.repeatCount + 1) + ' time in 30 days_' : '') +
+    (r.notes ? '\n   _note: ' + r.notes + '_' : '')
   );
-  const missedBlock = perfect ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
+  const missedBlock = failed.length === 0 ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
   const notesBlock = run.generalNotes && run.generalNotes.trim() ? '\n\n*Additional notes:*\n' + run.generalNotes.trim() : '';
 
-  const text = [header, meta, scoreLine + missedBlock + notesBlock].join('\n');
+  const text = meta + missedBlock + notesBlock;
 
   return {
     text,
@@ -1284,6 +1348,104 @@ function scoreableResponses(runs) {
   return out;
 }
 
+/* ---- SAFE Audit Rating (1-9) ---- */
+
+const SAFE_RATING_COLORS = ['#0f6b3a', '#3f9142', '#7cb342', '#aacf53', '#f4e04d', '#f6b93b', '#f3873c', '#e35b4f', '#b0231f', '#7a1420'];
+const SAFE_RATING_LABELS = ['Elite', 'Good', 'Good', 'Fair', 'Fair', 'Fair', 'Unsatisfactory', 'Unsatisfactory', 'Sub-Standard', 'Sub-Standard'];
+
+function computeSafeRating(percent, hasImmediate, hasRepeatHighOrImmediate) {
+  let scoreBand;
+  if (percent >= 95) scoreBand = 1;
+  else if (percent >= 90) scoreBand = 2;
+  else if (percent >= 85) scoreBand = 3;
+  else if (percent >= 80) scoreBand = 4;
+  else if (percent >= 75) scoreBand = 5;
+  else if (percent >= 70) scoreBand = 6;
+  else if (percent >= 60) scoreBand = 7;
+  else if (percent >= 50) scoreBand = 8;
+  else if (percent >= 40) scoreBand = 9;
+  else scoreBand = 10;
+
+  let rating = scoreBand;
+
+  // A Repeat High/Immediate finding demotes an otherwise-elite/good score
+  // into at least a 3 (if it would've been 1 or 2) or a 4 (if it would've
+  // been a 3) — checked against the original score band, not the running
+  // rating, so this can't cascade past its intended single step.
+  if (hasRepeatHighOrImmediate && scoreBand <= 2) rating = 3;
+  else if (hasRepeatHighOrImmediate && scoreBand === 3) rating = 4;
+
+  // Any Immediate Action finding floors the rating at 4 regardless of
+  // score, but doesn't improve a score that's already worse than that.
+  if (hasImmediate) rating = Math.max(rating, 4);
+
+  return rating;
+}
+
+function runHasRepeatHighOrImmediate(run) {
+  const repeatCounts = computeRepeatFlags(run);
+  return run.responses.some(r =>
+    isFailOption(r.answer) &&
+    (r.severity === 'HIGH' || r.severity === 'IMMEDIATE') &&
+    (repeatCounts[r.code] || 0) > 0
+  );
+}
+
+function computeRatingForRuns(completedRuns) {
+  if (!completedRuns.length) return null;
+  const percent = Math.round(completedRuns.reduce((s, r) => s + r.score.percent, 0) / completedRuns.length);
+  const hasImmediate = completedRuns.some(r => r.score.criticalFails > 0);
+  const hasRepeatHighOrImmediate = completedRuns.some(runHasRepeatHighOrImmediate);
+  const rating = computeSafeRating(percent, hasImmediate, hasRepeatHighOrImmediate);
+  return { rating, percent, hasImmediate, hasRepeatHighOrImmediate };
+}
+
+function ratingReasonHTML(info) {
+  const bits = [];
+  if (info.hasImmediate) bits.push('an Immediate Action finding');
+  if (info.hasRepeatHighOrImmediate) bits.push('a Repeat High/Immediate finding');
+  if (bits.length === 0) return 'Based on the ' + info.percent + '% average score for this range, with no Immediate or Repeat High/Immediate findings.';
+  return 'Based on the ' + info.percent + '% average score for this range, plus ' + bits.join(' and ') + ' in the period.';
+}
+
+function safeRatingGaugeHTML(rating, size) {
+  size = size || 160;
+  const height = Math.round(size * 0.66);
+  const cx = size / 2, cy = height * 0.94, r = size * 0.42;
+  const strokeW = size * 0.15;
+  const segCount = SAFE_RATING_COLORS.length;
+  const segAngle = 180 / segCount;
+
+  function pt(angleDeg, radius) {
+    const rad = (angleDeg * Math.PI) / 180;
+    return [cx + radius * Math.cos(rad), cy - radius * Math.sin(rad)];
+  }
+
+  let segs = '';
+  for (let i = 0; i < segCount; i++) {
+    const a0 = 180 - i * segAngle;
+    const a1 = 180 - (i + 1) * segAngle;
+    const [x0, y0] = pt(a0, r);
+    const [x1, y1] = pt(a1, r);
+    const isCurrent = rating === i + 1;
+    segs += `<path d="M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}" fill="none" stroke="${SAFE_RATING_COLORS[i]}" stroke-width="${strokeW}" opacity="${isCurrent ? 1 : 0.28}" />`;
+  }
+
+  const midAngle = 180 - (rating - 0.5) * segAngle;
+  const [nx, ny] = pt(midAngle, r * 0.82);
+  const needle = `<line x1="${cx}" y1="${cy}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" /><circle cx="${cx}" cy="${cy}" r="5" fill="var(--ink)" />`;
+
+  return `
+    <div class="safe-gauge">
+      <svg width="${size}" height="${height}" viewBox="0 0 ${size} ${height}">
+        ${segs}
+        ${needle}
+      </svg>
+      <div class="safe-gauge-label">Rating ${rating} <span class="pill-outline">${esc(SAFE_RATING_LABELS[rating - 1])}</span></div>
+    </div>
+  `;
+}
+
 function computeCategoryStats(completedRuns) {
   const agg = {};
   scoreableResponses(completedRuns).forEach(({ resp }) => {
@@ -1381,7 +1543,7 @@ function computePreviousPeriod(fromStr, toStr) {
   const prevTo = new Date(from);
   prevTo.setDate(prevTo.getDate() - 1);
   const prevFrom = new Date(prevTo.getTime() - lengthMs);
-  return { from: prevFrom.toISOString().slice(0, 10), to: prevTo.toISOString().slice(0, 10) };
+  return { from: localDateStr(prevFrom), to: localDateStr(prevTo) };
 }
 
 function trendDeltaHTML(series) {
@@ -1561,6 +1723,19 @@ function buildReportsBodyHTML(search, locFilter, statusFilter, dateFrom, dateTo)
     </div>
   `;
 
+  const ratingInfo = computeRatingForRuns(completed);
+  if (ratingInfo) {
+    html += `
+      <section class="panel rating-panel">
+        ${safeRatingGaugeHTML(ratingInfo.rating, 170)}
+        <div class="rating-details">
+          <h3>SAFE Audit Rating</h3>
+          <p>${ratingReasonHTML(ratingInfo)}</p>
+        </div>
+      </section>
+    `;
+  }
+
   if (filtered.length === 0) {
     window.__reportsTrendSeries = [];
     window.__reportsDowStats = [];
@@ -1655,7 +1830,7 @@ window.__repApplyPreset = function () {
   const preset = document.getElementById('repDatePreset').value;
   const fromEl = document.getElementById('repDateFrom');
   const toEl = document.getElementById('repDateTo');
-  const toISO = d => d.toISOString().slice(0, 10);
+  const toISO = localDateStr;
   const today = new Date();
   if (preset === '') {
     fromEl.value = ''; toEl.value = '';
@@ -1678,6 +1853,7 @@ function renderRunDetail() {
   const run = state.runs.find(r => r.id === state.activeRunId);
   if (!run) return emptyStateHTML('Assessment not found.');
   const failed = run.responses.filter(r => isFailOption(r.answer));
+  const repeatCounts = computeRepeatFlags(run);
   const byCategory = {};
   run.responses.forEach(r => (byCategory[r.sectionName || r.category] = byCategory[r.sectionName || r.category] || []).push(r));
 
@@ -1715,7 +1891,7 @@ function renderRunDetail() {
           ${failed.map(r => `
             <li class="q-row">
               <div class="q-main">
-                <div class="q-card-badge-row">${badgeHTML(r.severity)} <span class="q-code">${esc(r.code)}</span></div>
+                <div class="q-card-badge-row">${badgeHTML(r.severity)} <span class="q-code">${esc(r.code)}</span> ${repeatCounts[r.code] > 0 ? `<span class="repeat-badge">&#128257; Repeat &mdash; ${repeatCounts[r.code] + 1}${ordinalSuffix(repeatCounts[r.code] + 1)} time in 30 days</span>` : ''}</div>
                 <div class="q-text">${esc(r.text)}</div>
                 ${r.notes ? `<div class="q-guidance">Note: ${esc(r.notes)}</div>` : ''}
               </div>
@@ -2354,6 +2530,10 @@ async function handleClickAction(t, e) {
       return;
     }
     state.takeValidationAttempted = false;
+    const repeatCounts = computeRepeatFlags(state.draftRun);
+    state.draftRun.responses.forEach(r => {
+      if (isFailOption(r.answer)) r.repeatCount = repeatCounts[r.code] || 0;
+    });
     state.takeStage = 'review';
     render();
     return;
@@ -2377,7 +2557,8 @@ async function handleClickAction(t, e) {
       delete finished.id;
       const savedId = state.draftRun.id;
       try {
-        await submitRunToDb(finished);
+        const newRunId = await submitRunToDb(finished);
+        recordRecentFailures(state.draftRun, newRunId, failed);
         removeLocalDraft(savedId);
         state.draftRun = null;
         state.takeStage = 'filling';
@@ -2468,4 +2649,5 @@ subscribeQuestions();
 subscribeTemplates();
 subscribeLocations();
 subscribeCategories();
+subscribeRecentFailures();
 render();
