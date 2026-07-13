@@ -625,7 +625,8 @@ function renderTake() {
   const availableTemplates = state.templates.filter(t => !(t.locationIds && t.locationIds.length) || t.locationIds.includes(state.selectedLocationId));
 
   return `
-    ${pageHeaderHTML('Take Assessment', 'Choose a template')}
+    ${pageHeaderHTML('Take Assessment', 'Choose a template',
+      `<button class="btn btn-ghost btn-sm" data-action="change-location">Location: ${esc(state.selectedLocationName || 'Not set')} &middot; Change</button>`)}
     ${drafts.length > 0 ? `
       <section class="panel">
         <h3>Resume a saved draft</h3>
@@ -647,9 +648,9 @@ function renderTake() {
       <div class="template-grid">
         ${availableTemplates.map(t => `
           <div class="template-card clickable" data-action="start-run" data-id="${t.id}">
-            <h3>${esc(t.name)}</h3>
+            <h3>${esc(t.name)} ${t.type === 'dynamic' ? '<span class="pill-outline" title="Auto-updates as matching questions are added or removed">&#9889; Auto-updating</span>' : ''}</h3>
             <p>${esc(t.description || '')}</p>
-            <div class="template-meta">${(t.questionIds || []).length} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
+            <div class="template-meta">${templateQuestionCount(t)} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
           </div>
         `).join('')}
       </div>
@@ -685,7 +686,7 @@ function renderTakeInProgress() {
 
   return `
     ${pageHeaderHTML(run.templateName, 'Assessment in progress',
-      `<button class="btn btn-ghost" data-action="cancel-draft">Choose different template</button>`)}
+      `<div class="header-actions"><button class="btn btn-ghost" data-action="cancel-draft">Choose different template</button><button class="btn btn-ghost" data-action="change-location">Change location</button></div>`)}
 
     <div class="panel meta-form">
       <div class="meta-field">
@@ -818,9 +819,8 @@ function getSectionFlags(run) {
   return { maintenance, supply };
 }
 
-function buildSlackPayload(run, score) {
+function buildAuditPayload(run, score) {
   const failed = run.responses.filter(r => isFailOption(r.answer));
-  const { maintenance, supply } = getSectionFlags(run);
 
   const meta = 'Template: ' + run.templateName + '  |  Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date);
 
@@ -830,16 +830,9 @@ function buildSlackPayload(run, score) {
     (r.notes ? '\n   _note: ' + r.notes + '_' : '')
   );
   const missedBlock = failed.length === 0 ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
-
-  const maintenanceLines = maintenance.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
-  const maintenanceBlock = maintenance.length ? '\n\n:wrench: *Maintenance ticket requested (' + maintenance.length + '):*\n' + maintenanceLines.join('\n') : '';
-
-  const supplyLines = supply.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
-  const supplyBlock = supply.length ? '\n\n:package: *Supply request submitted (' + supply.length + '):*\n' + supplyLines.join('\n') : '';
-
   const notesBlock = run.generalNotes && run.generalNotes.trim() ? '\n\n*Additional notes:*\n' + run.generalNotes.trim() : '';
 
-  const text = meta + missedBlock + maintenanceBlock + supplyBlock + notesBlock;
+  const text = meta + missedBlock + notesBlock;
 
   return {
     text,
@@ -852,16 +845,70 @@ function buildSlackPayload(run, score) {
     criticalFails: score.criticalFails,
     missedCount: failed.length,
     missedSummary: missedLines.join('\n'),
-    generalNotes: run.generalNotes || '',
-    maintenanceCount: maintenance.length,
-    maintenanceSummary: maintenanceLines.join('\n'),
-    supplyCount: supply.length,
-    supplySummary: supplyLines.join('\n')
+    generalNotes: run.generalNotes || ''
   };
 }
 
-async function sendToZapierWebhook(payload) {
-  const url = window.ZAPIER_WEBHOOK_URL;
+function buildMaintenancePayload(run) {
+  const { maintenance } = getSectionFlags(run);
+  if (!maintenance.length) return null;
+  const lines = maintenance.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
+  const text = ':wrench: *Maintenance ticket requested \u2014 ' + (run.locationName || 'Unknown location') + '*\n' +
+    'Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date) + '\n\n' + lines.join('\n');
+  return {
+    text,
+    location: run.locationName || '',
+    template: run.templateName || '',
+    assessor: run.assessorName || '',
+    date: run.date || '',
+    count: maintenance.length,
+    summary: lines.join('\n'),
+    items: maintenance
+  };
+}
+
+function buildSupplyPayload(run) {
+  const { supply } = getSectionFlags(run);
+  if (!supply.length) return null;
+  const lines = supply.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
+  const text = ':package: *Supply request \u2014 ' + (run.locationName || 'Unknown location') + '*\n' +
+    'Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date) + '\n\n' + lines.join('\n');
+  return {
+    text,
+    location: run.locationName || '',
+    template: run.templateName || '',
+    assessor: run.assessorName || '',
+    date: run.date || '',
+    count: supply.length,
+    summary: lines.join('\n'),
+    items: supply
+  };
+}
+
+function buildCombinedPayload(run, score) {
+  const audit = buildAuditPayload(run, score);
+  const maint = buildMaintenancePayload(run);
+  const supply = buildSupplyPayload(run);
+  return {
+    ...audit, // text here is audit-only — no maintenance/supply content mixed in
+    maintenanceCount: maint ? maint.count : 0,
+    maintenanceSummary: maint ? maint.summary : '',
+    maintenanceItems: maint ? maint.items : [],
+    supplyCount: supply ? supply.count : 0,
+    supplySummary: supply ? supply.summary : '',
+    supplyItems: supply ? supply.items : []
+  };
+}
+
+function buildOutgoingWebhooks(run, score) {
+  const failed = run.responses.filter(r => isFailOption(r.answer));
+  const { maintenance, supply } = getSectionFlags(run);
+  const hasSomethingToSend = failed.length > 0 || (run.generalNotes && run.generalNotes.trim()) || maintenance.length > 0 || supply.length > 0;
+  if (!hasSomethingToSend) return [];
+  return [{ label: 'SAFE audit + flags', url: window.ZAPIER_WEBHOOK_URL, payload: buildCombinedPayload(run, score) }];
+}
+
+async function sendToZapierWebhook(payload, url) {
   if (!url || url === 'REPLACE_ME') throw new Error('No Zapier webhook URL configured in firebase-config.js yet.');
   // Deliberately no custom headers and mode:'no-cors' — Zapier's webhook
   // endpoint doesn't return proper CORS headers for a normal JSON POST
@@ -872,7 +919,7 @@ async function sendToZapierWebhook(payload) {
   await fetch(url, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
 }
 
-function runSlackSendSequence(payload, onDone) {
+function runSlackSendSequence(outgoing, onDone) {
   state.showingSlackAnim = true;
   const root = document.getElementById('modalRoot');
   root.innerHTML = `
@@ -883,23 +930,29 @@ function runSlackSendSequence(payload, onDone) {
             <div class="slack-icon-pulse"></div>
             <div class="slack-icon">&#128172;</div>
           </div>
-          <div class="slack-status" id="slackStatus">Preparing summary&hellip;</div>
+          <div class="slack-status" id="slackStatus">Preparing ${outgoing.length > 1 ? outgoing.length + ' updates' : 'summary'}&hellip;</div>
         </div>
       </div>
     </div>
   `;
   setTimeout(async () => {
     const s = document.getElementById('slackStatus');
-    if (s) s.textContent = 'Sending to Slack\u2026';
-    try {
-      await sendToZapierWebhook(payload);
-      const wrap = document.getElementById('slackIconWrap');
+    if (s) s.textContent = outgoing.length > 1 ? 'Sending ' + outgoing.length + ' updates\u2026' : 'Sending\u2026';
+    const results = await Promise.allSettled(outgoing.map(o => sendToZapierWebhook(o.payload, o.url)));
+    const failedSends = results
+      .map((r, i) => ({ r, label: outgoing[i].label }))
+      .filter(x => x.r.status === 'rejected');
+    failedSends.forEach(f => console.error(f.label + ' webhook failed', f.r.reason));
+
+    const wrap = document.getElementById('slackIconWrap');
+    const s2 = document.getElementById('slackStatus');
+    if (failedSends.length === 0) {
       if (wrap) wrap.classList.add('done');
-      if (s) s.innerHTML = 'Sent to Slack';
-    } catch (err) {
-      console.error('Slack webhook failed', err);
-      const s2 = document.getElementById('slackStatus');
-      if (s2) s2.innerHTML = 'Couldn\u2019t reach Slack \u2014 submitting anyway';
+      if (s2) s2.innerHTML = outgoing.length > 1 ? 'Sent (' + outgoing.length + ')' : 'Sent';
+    } else if (failedSends.length < outgoing.length) {
+      if (s2) s2.innerHTML = 'Sent, but ' + failedSends.length + ' didn\u2019t go through';
+    } else {
+      if (s2) s2.innerHTML = 'Couldn\u2019t send \u2014 submitting anyway';
     }
     setTimeout(() => {
       document.getElementById('modalRoot').innerHTML = '';
@@ -1148,9 +1201,9 @@ function renderTemplatesTab() {
             : t.locationIds.map(id => { const l = state.locations.find(x => x.id === id); return l ? l.name : '(deleted location)'; }).join(', ');
           return `
           <div class="template-card">
-            <h3>${esc(t.name)}</h3>
+            <h3>${esc(t.name)} ${t.type === 'dynamic' ? '<span class="pill-outline" title="Auto-updates as matching questions are added or removed">&#9889; Auto-updating</span>' : ''}</h3>
             <p>${esc(t.description || '')}</p>
-            <div class="template-meta">${(t.questionIds || []).length} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
+            <div class="template-meta">${templateQuestionCount(t)} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}${t.type === 'dynamic' ? ' &middot; ' + (t.severityFilter || []).join('/') : ''}</div>
             <div class="template-meta" style="${restricted ? 'color:var(--medium);' : ''}">${restricted ? '&#128205; ' : '&#127760; '}${esc(scopeLabel)}</div>
             <div class="template-actions">
               <button class="btn btn-ghost btn-sm" data-action="edit-template" data-id="${esc(t.id)}">Edit</button>
@@ -1168,9 +1221,12 @@ let sectionsDraft = [];
 let sortableInstances = [];
 
 function renderTemplateEditor() {
-  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [], locationIds: [] } : state.editingTemplate;
+  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [], locationIds: [], type: 'fixed', severityFilter: [] } : state.editingTemplate;
   const frequencies = ['Daily', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'As Needed'];
   const hasRestriction = (t.locationIds || []).length > 0;
+  const isDynamic = t.type === 'dynamic';
+  const currentSeverityFilter = t.severityFilter || [];
+  const dynamicCount = state.questions.filter(q => currentSeverityFilter.includes(q.severity)).length;
 
   return `
     <div class="panel">
@@ -1196,14 +1252,32 @@ function renderTemplateEditor() {
           </label>
         `).join('')}
       </div>
+      <label class="field-label">Template type</label>
+      <label class="check-inline" style="margin-bottom:6px;">
+        <input type="radio" name="tplType" id="tplTypeFixed" ${!isDynamic ? 'checked' : ''} onchange="window.__toggleTplType()" /> Fixed list of questions
+      </label>
+      <label class="check-inline">
+        <input type="radio" name="tplType" id="tplTypeDynamic" ${isDynamic ? 'checked' : ''} onchange="window.__toggleTplType()" /> Dynamic &mdash; auto-include by severity
+      </label>
+      <div id="tplDynamicOptions" style="display:${isDynamic ? 'block' : 'none'};margin-top:10px;padding:10px;background:var(--page-bg);border-radius:6px;">
+        <p style="color:var(--ink-soft);font-size:.8rem;margin:0 0 8px;">Automatically includes every question at these severities &mdash; including ones added to the library later, no need to come back and edit this template.</p>
+        ${['IMMEDIATE', 'HIGH', 'MEDIUM', 'LOW'].map(sev => `
+          <label class="check-inline" style="display:block;margin-bottom:6px;">
+            <input type="checkbox" class="tpl-severity-checkbox" value="${sev}" ${currentSeverityFilter.includes(sev) ? 'checked' : ''} onchange="window.__updateDynamicCount()" /> ${sev}
+          </label>
+        `).join('')}
+        <div class="pill-outline" id="tplDynamicCount">${dynamicCount} question${dynamicCount === 1 ? '' : 's'} currently match</div>
+      </div>
     </div>
-    <div class="filter-bar">
-      <button class="btn ${state.templateEditorTab === 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="arrange">1. Arrange questions</button>
-      <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">2. Bulk select by category</button>
-      <div class="pill-outline" id="tplSelCount" style="margin-left:auto;">${window.__templateSelection.size} selected</div>
-    </div>
-    <div id="templateEditorBody">
-      ${state.templateEditorTab === 'arrange' ? renderArrangeTab() : renderSelectTab()}
+    <div id="tplTabsSection" style="display:${isDynamic ? 'none' : 'block'};">
+      <div class="filter-bar">
+        <button class="btn ${state.templateEditorTab === 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="arrange">1. Arrange questions</button>
+        <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">2. Bulk select by category</button>
+        <div class="pill-outline" id="tplSelCount" style="margin-left:auto;">${window.__templateSelection.size} selected</div>
+      </div>
+      <div id="templateEditorBody">
+        ${state.templateEditorTab === 'arrange' ? renderArrangeTab() : renderSelectTab()}
+      </div>
     </div>
     <div class="sticky-footer">
       <button class="btn btn-ghost" data-action="cancel-template-edit">Cancel</button>
@@ -1754,6 +1828,11 @@ function initReportCharts() {
   }
 }
 
+function templateQuestionCount(tpl) {
+  if (tpl.type === 'dynamic') return state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).length;
+  return (tpl.questionIds || []).length;
+}
+
 function renderReports() {
   return `
     ${pageHeaderHTML('Reports', 'Assessment history', `<button class="btn btn-ghost" data-action="export-csv">Export CSV</button>`)}
@@ -2243,6 +2322,21 @@ window.__toggleTplAvailability = function () {
   if (box) box.style.display = specific ? 'block' : 'none';
 };
 
+window.__toggleTplType = function () {
+  const dynamic = document.getElementById('tplTypeDynamic').checked;
+  const box = document.getElementById('tplDynamicOptions');
+  const tabs = document.getElementById('tplTabsSection');
+  if (box) box.style.display = dynamic ? 'block' : 'none';
+  if (tabs) tabs.style.display = dynamic ? 'none' : 'block';
+};
+
+window.__updateDynamicCount = function () {
+  const checked = Array.from(document.querySelectorAll('.tpl-severity-checkbox:checked')).map(el => el.value);
+  const count = state.questions.filter(q => checked.includes(q.severity)).length;
+  const el = document.getElementById('tplDynamicCount');
+  if (el) el.textContent = count + ' question' + (count === 1 ? '' : 's') + ' currently match';
+};
+
 window.__sectionSearch = function (sectionId) {
   const input = document.querySelector('.section-add-search[data-section-id="' + sectionId + '"]');
   const resultsEl = document.getElementById('section-add-results-' + sectionId);
@@ -2446,6 +2540,19 @@ async function handleClickAction(t, e) {
     render();
     return;
   }
+  if (action === 'change-location') {
+    if (state.draftRun) {
+      const hasProgress = state.draftRun.responses.some(r => r.answer != null) || state.draftRun.assessorName;
+      if (hasProgress && !confirm('Changing location will discard this in-progress assessment. Continue?')) return;
+    }
+    state.draftRun = null;
+    state.takeStage = 'filling';
+    state.takeValidationAttempted = false;
+    state.selectedLocationId = null;
+    state.selectedLocationName = null;
+    render();
+    return;
+  }
 
   if (action === 'view-photo') { showPhotoLightbox(t.getAttribute('data-url')); return; }
   if (action === 'close-lightbox') {
@@ -2572,24 +2679,39 @@ async function handleClickAction(t, e) {
   }
   if (action === 'save-template') {
     const name = document.getElementById('tplName').value.trim();
-    if (!name || window.__templateSelection.size === 0) { alert('Give the template a name and select at least one question.'); return; }
-    reconcileSections();
-    const sections = readSectionsFromDom(); // picks up live DOM order if the Arrange tab is mounted, else falls back to sectionsDraft
-    const flatIds = sections.flatMap(s => s.questionIds);
+    if (!name) { alert('Give the template a name.'); return; }
     const isSpecific = document.getElementById('tplAvailSpecific').checked;
     const locationIds = isSpecific
       ? Array.from(document.querySelectorAll('.tpl-location-checkbox:checked')).map(el => el.value)
       : [];
     if (isSpecific && locationIds.length === 0) { alert('Select at least one location, or switch back to "All locations".'); return; }
-    await saveTemplateToDb({
+
+    const isDynamic = document.getElementById('tplTypeDynamic').checked;
+    const baseFields = {
       id: id || undefined,
       name,
       description: document.getElementById('tplDesc').value.trim(),
       frequency: document.getElementById('tplFrequency').value,
-      sections: sections.map(s => ({ id: s.id, name: s.name, questionIds: s.questionIds })),
-      questionIds: flatIds,
       locationIds
-    });
+    };
+
+    if (isDynamic) {
+      const severityFilter = Array.from(document.querySelectorAll('.tpl-severity-checkbox:checked')).map(el => el.value);
+      if (severityFilter.length === 0) { alert('Select at least one severity level for a dynamic template.'); return; }
+      await saveTemplateToDb({ ...baseFields, type: 'dynamic', severityFilter, sections: [], questionIds: [] });
+    } else {
+      if (window.__templateSelection.size === 0) { alert('Select at least one question.'); return; }
+      reconcileSections();
+      const sections = readSectionsFromDom(); // picks up live DOM order if the Arrange tab is mounted, else falls back to sectionsDraft
+      const flatIds = sections.flatMap(s => s.questionIds);
+      await saveTemplateToDb({
+        ...baseFields,
+        type: 'fixed',
+        severityFilter: [],
+        sections: sections.map(s => ({ id: s.id, name: s.name, questionIds: s.questionIds })),
+        questionIds: flatIds
+      });
+    }
     state.editingTemplate = null; sectionsDraft = []; render();
     return;
   }
@@ -2723,9 +2845,11 @@ async function handleClickAction(t, e) {
     const tpl = state.templates.find(x => x.id === id);
     if (!tpl) return;
     const responses = [];
-    const sectionList = (tpl.sections && tpl.sections.length)
-      ? tpl.sections
-      : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
+    const sectionList = tpl.type === 'dynamic'
+      ? [{ id: 'dynamic', name: null, questionIds: state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).map(q => q.id) }]
+      : (tpl.sections && tpl.sections.length)
+        ? tpl.sections
+        : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
     sectionList.forEach(section => {
       section.questionIds.forEach(qid => {
         const q = state.questions.find(x => x.id === qid);
@@ -2828,9 +2952,6 @@ async function handleClickAction(t, e) {
 
     const score = computeScore(state.draftRun.responses);
     const failed = state.draftRun.responses.filter(r => isFailOption(r.answer));
-    const { maintenance: flaggedMaintenance, supply: flaggedSupply } = getSectionFlags(state.draftRun);
-    const hasFlags = flaggedMaintenance.length > 0 || flaggedSupply.length > 0;
-    const shouldNotifySlack = failed.length > 0 || !!state.draftRun.generalNotes || hasFlags;
 
     const finishSubmit = async () => {
       const finished = sanitizeForFirestore({ ...state.draftRun, status: 'completed', score, completedAt: new Date().toISOString() });
@@ -2851,9 +2972,9 @@ async function handleClickAction(t, e) {
       }
     };
 
-    if (shouldNotifySlack) {
-      const payload = buildSlackPayload(state.draftRun, score);
-      runSlackSendSequence(payload, finishSubmit);
+    const outgoing = buildOutgoingWebhooks(state.draftRun, score);
+    if (outgoing.length > 0) {
+      runSlackSendSequence(outgoing, finishSubmit);
     } else {
       await finishSubmit();
     }
