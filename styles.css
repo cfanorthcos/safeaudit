@@ -292,6 +292,13 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
 .arrange-row.sortable-ghost { opacity: .3; }
 .arrange-row.sortable-chosen { background: rgba(26,60,110,.06); border-radius: 5px; }
 
+.section-add { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.section-add-search-box { flex: 1; min-width: 160px; }
+.section-add-results { width: 100%; order: 3; margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.section-add-result { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 5px; font-size: .82rem; cursor: pointer; background: var(--page-bg); }
+.section-add-result:hover { background: rgba(26,60,110,.08); }
+.section-add-empty { font-size: .8rem; color: var(--ink-soft); padding: 6px 2px; }
+
 /* ---------- Reference photos ---------- */
 .photos-editor { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
 .photo-thumb { position: relative; width: 84px; height: 84px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
