@@ -196,6 +196,16 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
 
 /* ---------- Take assessment meta ---------- */
 .meta-form { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+.field-error { border-color: var(--danger) !important; background: rgba(212,61,61,.05); }
+
+.section-panel { padding: 0; }
+.section-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 20px; cursor: pointer; list-style: none; }
+.section-panel-head::-webkit-details-marker { display: none; }
+.section-panel-head .chev { color: var(--ink-soft); flex-shrink: 0; transition: transform .15s; margin-left: auto; }
+details.section-panel[open] > .section-panel-head .chev { transform: rotate(180deg); }
+.section-panel-body { padding: 0 20px 20px; }
+.section-status { font-family: 'IBM Plex Mono', monospace; font-size: .72rem; color: var(--ink-soft); white-space: nowrap; }
+.section-status-complete { color: var(--safe); font-weight: 700; }
 .meta-field label { display: flex; align-items: center; gap: 5px; font-family: 'IBM Plex Mono', monospace; font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 5px; }
 
 .progress-bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
