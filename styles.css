@@ -93,12 +93,13 @@ a { color: var(--link); }
 .btn-ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
 .btn-ghost:hover { border-color: var(--navy); color: var(--navy); }
 .btn-sm { padding: 5px 10px; font-size: .75rem; }
-.icon-btn { background: none; border: none; color: var(--ink-soft); cursor: pointer; padding: 5px; border-radius: 4px; display: inline-flex; }
+.icon-btn { background: none; border: none; color: var(--ink-soft); cursor: pointer; padding: 8px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; min-width: 38px; min-height: 38px; }
 .icon-btn:hover { background: rgba(0,0,0,.06); color: var(--ink); }
 
 input, select, textarea {
   width: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 9px 10px; font-size: .88rem; color: var(--ink); background: #fff;
 }
+input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; flex-shrink: 0; }
 textarea { resize: vertical; }
 label.field-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-soft); margin: 12px 0 5px; }
 label.field-label:first-child { margin-top: 0; }
@@ -120,7 +121,7 @@ label.field-label:first-child { margin-top: 0; }
 .search-box { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fff; flex: 1; min-width: 180px; color: var(--ink-soft); }
 .search-box input { border: none; outline: none; background: none; flex: 1; font-size: .85rem; padding: 0; }
 .filter-bar select { width: auto; }
-.check-inline { display: flex; align-items: center; gap: 6px; font-size: .83rem; }
+.check-inline { display: flex; align-items: center; gap: 8px; font-size: .83rem; padding: 4px 0; cursor: pointer; }
 .check-inline input { width: auto; }
 
 /* ---------- Severity badges ---------- */
@@ -155,7 +156,7 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
 .child-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
 .option-group { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
-.opt-btn { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 7px 13px; font-size: .82rem; cursor: pointer; color: var(--ink-soft); }
+.opt-btn { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 11px 16px; font-size: .85rem; cursor: pointer; color: var(--ink-soft); min-height: 44px; }
 .opt-btn.opt-pass.active { background: var(--safe); border-color: var(--safe); color: #fff; }
 .opt-btn.opt-fail.active { background: var(--danger); border-color: var(--danger); color: #fff; }
 .opt-btn.opt-neutral.active { background: var(--ink-soft); border-color: var(--ink-soft); color: #fff; }
@@ -248,6 +249,10 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
 .child-item.missing { background: rgba(212,61,61,.06); border-radius: 6px; outline: 2px solid var(--danger); outline-offset: 2px; }
 .answered-check { color: var(--safe); font-weight: 700; margin-left: 4px; }
 .notes-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
+.section-flags { display: flex; gap: 16px; margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--line); flex-wrap: wrap; }
+.section-flags .check-inline { font-size: .82rem; }
+.flag-item { flex: 1; min-width: 200px; }
+.flag-item .section-flag-note { margin-top: 6px; width: 100%; }
 .note-required-flag { font-size: .74rem; color: var(--danger); font-weight: 600; }
 .missing-flag { font-size: .78rem; color: var(--danger); margin-top: 6px; font-weight: 600; }
 
@@ -318,7 +323,10 @@ details[open] > .q-card-head .chev { transform: rotate(180deg); }
 
 @media print {
   .sidebar, .topbar, .sticky-footer, .header-actions { display: none !important; }
-  .main { padding: 0; max-width: none; }
+  html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
+  .app-shell { display: block !important; min-height: 0 !important; }
+  .main { display: block !important; padding: 0; max-width: none; flex: none; }
+  .panel, .stamp, .q-list, .take-list { page-break-inside: avoid; }
 }
 
 /* ---------- Reports analytics ---------- */
