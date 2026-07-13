@@ -657,6 +657,22 @@ function renderTake() {
   `;
 }
 
+function sectionFlagsHTML(sectionName, run) {
+  const flags = (run.sectionFlags && run.sectionFlags[sectionName]) || {};
+  return `
+    <div class="section-flags">
+      <div class="flag-item">
+        <label class="check-inline"><input type="checkbox" class="section-flag-checkbox" data-flag="needsMaintenance" data-section="${esc(sectionName)}" ${flags.needsMaintenance ? 'checked' : ''} /> &#128295; Submit a maintenance ticket for this section</label>
+        <textarea class="section-flag-note" data-flag="maintenanceNote" data-section="${esc(sectionName)}" rows="2" placeholder="What does the ticket need to say?" style="display:${flags.needsMaintenance ? 'block' : 'none'}">${esc(flags.maintenanceNote || '')}</textarea>
+      </div>
+      <div class="flag-item">
+        <label class="check-inline"><input type="checkbox" class="section-flag-checkbox" data-flag="needsSupply" data-section="${esc(sectionName)}" ${flags.needsSupply ? 'checked' : ''} /> &#128230; Submit a supply request for this section</label>
+        <textarea class="section-flag-note" data-flag="supplyNote" data-section="${esc(sectionName)}" rows="2" placeholder="What's needed?" style="display:${flags.needsSupply ? 'block' : 'none'}">${esc(flags.supplyNote || '')}</textarea>
+      </div>
+    </div>
+  `;
+}
+
 function renderTakeInProgress() {
   const run = state.draftRun;
   const answered = run.responses.filter(isItemComplete).length;
@@ -699,6 +715,7 @@ function renderTakeInProgress() {
       <section class="panel">
         <h3>${esc(sec)}</h3>
         ${groupByParent(bySection[sec]).map(g => renderTakeGroup(g)).join('')}
+        ${sectionFlagsHTML(sec, run)}
       </section>
     `).join('')}
 
@@ -710,18 +727,17 @@ function renderTakeInProgress() {
   `;
 }
 
-function flaggedFollowUpHTML(responses) {
-  const maint = responses.filter(r => r.needsMaintenance);
-  const supply = responses.filter(r => r.needsSupply);
-  if (!maint.length && !supply.length) return '';
+function flaggedFollowUpHTML(run) {
+  const { maintenance, supply } = getSectionFlags(run);
+  if (!maintenance.length && !supply.length) return '';
   return `
     <section class="panel">
       <h3>Flagged for follow-up</h3>
-      ${maint.length ? `
+      ${maintenance.length ? `
         <div class="q-guidance" style="margin-bottom:8px;">
           &#128295; <strong>Maintenance ticket:</strong>
           <ul class="q-list">
-            ${maint.map(r => `<li class="q-row"><div class="q-main"><span class="q-code">${esc(r.code)}</span> ${esc(r.text)}${r.maintenanceNote ? `<div class="q-guidance">Note: ${esc(r.maintenanceNote)}</div>` : ''}</div></li>`).join('')}
+            ${maintenance.map(m => `<li class="q-row"><div class="q-main">${esc(m.section)}${m.note ? `<div class="q-guidance">Note: ${esc(m.note)}</div>` : ''}</div></li>`).join('')}
           </ul>
         </div>
       ` : ''}
@@ -729,7 +745,7 @@ function flaggedFollowUpHTML(responses) {
         <div class="q-guidance">
           &#128230; <strong>Supply request:</strong>
           <ul class="q-list">
-            ${supply.map(r => `<li class="q-row"><div class="q-main"><span class="q-code">${esc(r.code)}</span> ${esc(r.text)}${r.supplyNote ? `<div class="q-guidance">Note: ${esc(r.supplyNote)}</div>` : ''}</div></li>`).join('')}
+            ${supply.map(m => `<li class="q-row"><div class="q-main">${esc(m.section)}${m.note ? `<div class="q-guidance">Note: ${esc(m.note)}</div>` : ''}</div></li>`).join('')}
           </ul>
         </div>
       ` : ''}
@@ -775,7 +791,7 @@ function renderTakeReview() {
       </section>
     `}
 
-    ${flaggedFollowUpHTML(run.responses)}
+    ${flaggedFollowUpHTML(run)}
 
     <section class="panel">
       <h3>General notes ${failed.length === 0 ? '(optional)' : '(optional, added to the Slack summary)'}</h3>
@@ -790,10 +806,21 @@ function renderTakeReview() {
   `;
 }
 
+function getSectionFlags(run) {
+  const flags = run.sectionFlags || {};
+  const maintenance = [];
+  const supply = [];
+  Object.keys(flags).forEach(sectionName => {
+    const f = flags[sectionName];
+    if (f && f.needsMaintenance) maintenance.push({ section: sectionName, note: f.maintenanceNote || '' });
+    if (f && f.needsSupply) supply.push({ section: sectionName, note: f.supplyNote || '' });
+  });
+  return { maintenance, supply };
+}
+
 function buildSlackPayload(run, score) {
   const failed = run.responses.filter(r => isFailOption(r.answer));
-  const maintenanceItems = run.responses.filter(r => r.needsMaintenance);
-  const supplyItems = run.responses.filter(r => r.needsSupply);
+  const { maintenance, supply } = getSectionFlags(run);
 
   const meta = 'Template: ' + run.templateName + '  |  Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date);
 
@@ -804,11 +831,11 @@ function buildSlackPayload(run, score) {
   );
   const missedBlock = failed.length === 0 ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
 
-  const maintenanceLines = maintenanceItems.map(r => '\u2022 ' + r.code + ' \u2014 ' + r.text + (r.maintenanceNote ? '\n   _note: ' + r.maintenanceNote + '_' : ''));
-  const maintenanceBlock = maintenanceItems.length ? '\n\n:wrench: *Maintenance ticket requested (' + maintenanceItems.length + '):*\n' + maintenanceLines.join('\n') : '';
+  const maintenanceLines = maintenance.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
+  const maintenanceBlock = maintenance.length ? '\n\n:wrench: *Maintenance ticket requested (' + maintenance.length + '):*\n' + maintenanceLines.join('\n') : '';
 
-  const supplyLines = supplyItems.map(r => '\u2022 ' + r.code + ' \u2014 ' + r.text + (r.supplyNote ? '\n   _note: ' + r.supplyNote + '_' : ''));
-  const supplyBlock = supplyItems.length ? '\n\n:package: *Supply request submitted (' + supplyItems.length + '):*\n' + supplyLines.join('\n') : '';
+  const supplyLines = supply.map(m => '\u2022 ' + m.section + (m.note ? '\n   _note: ' + m.note + '_' : ''));
+  const supplyBlock = supply.length ? '\n\n:package: *Supply request submitted (' + supply.length + '):*\n' + supplyLines.join('\n') : '';
 
   const notesBlock = run.generalNotes && run.generalNotes.trim() ? '\n\n*Additional notes:*\n' + run.generalNotes.trim() : '';
 
@@ -826,9 +853,9 @@ function buildSlackPayload(run, score) {
     missedCount: failed.length,
     missedSummary: missedLines.join('\n'),
     generalNotes: run.generalNotes || '',
-    maintenanceCount: maintenanceItems.length,
+    maintenanceCount: maintenance.length,
     maintenanceSummary: maintenanceLines.join('\n'),
-    supplyCount: supplyItems.length,
+    supplyCount: supply.length,
     supplySummary: supplyLines.join('\n')
   };
 }
@@ -957,16 +984,6 @@ function renderTakeItem(it) {
       <div class="notes-row">
         <button type="button" class="notes-toggle" data-action="toggle-notes" data-code="${esc(it.code)}">+ Add notes</button>
         <span class="note-required-flag" id="note-required-${esc(it.code)}" style="display:${needsNote ? 'inline' : 'none'}">Note required for a "No" answer</span>
-      </div>
-      <div class="flag-row">
-        <div class="flag-item">
-          <label class="check-inline"><input type="checkbox" class="flag-checkbox" data-flag="needsMaintenance" data-code="${esc(it.code)}" ${it.needsMaintenance ? 'checked' : ''} /> &#128295; Submit a maintenance ticket</label>
-          <textarea class="flag-note-textarea" data-flag="maintenanceNote" data-code="${esc(it.code)}" rows="2" placeholder="What does the ticket need to say?" style="display:${it.needsMaintenance ? 'block' : 'none'}">${esc(it.maintenanceNote || '')}</textarea>
-        </div>
-        <div class="flag-item">
-          <label class="check-inline"><input type="checkbox" class="flag-checkbox" data-flag="needsSupply" data-code="${esc(it.code)}" ${it.needsSupply ? 'checked' : ''} /> &#128230; Submit a supply request</label>
-          <textarea class="flag-note-textarea" data-flag="supplyNote" data-code="${esc(it.code)}" rows="2" placeholder="What's needed?" style="display:${it.needsSupply ? 'block' : 'none'}">${esc(it.supplyNote || '')}</textarea>
-        </div>
       </div>
       <div class="notes-input" id="notes-wrap-${esc(it.code)}" style="display:${(it.notes || needsNote) ? 'block' : 'none'}">
         <textarea rows="2" placeholder="Observations or corrective action&hellip;" data-code="${esc(it.code)}" class="notes-textarea">${esc(it.notes || '')}</textarea>
@@ -1980,7 +1997,7 @@ function renderRunDetail() {
         <p style="white-space:pre-wrap;font-size:.88rem;margin:0;">${esc(run.generalNotes)}</p>
       </section>
     ` : ''}
-    ${flaggedFollowUpHTML(run.responses)}
+    ${flaggedFollowUpHTML(run)}
     ${failed.length > 0 ? `
       <section class="panel">
         <h3>Items needing attention</h3>
@@ -2352,12 +2369,12 @@ function render() {
 ========================================================================= */
 
 document.addEventListener('input', (e) => {
-  const flagTa = e.target.closest('.flag-note-textarea');
+  const flagTa = e.target.closest('.section-flag-note');
   if (flagTa) {
-    const code = flagTa.getAttribute('data-code');
+    const sectionName = flagTa.getAttribute('data-section');
     const flag = flagTa.getAttribute('data-flag');
-    const r = findResponse(code);
-    if (r) r[flag] = flagTa.value;
+    if (!state.draftRun.sectionFlags[sectionName]) state.draftRun.sectionFlags[sectionName] = {};
+    state.draftRun.sectionFlags[sectionName][flag] = flagTa.value;
     return;
   }
   const ta = e.target.closest('.notes-textarea');
@@ -2369,19 +2386,17 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', (e) => {
-  const cb = e.target.closest('.flag-checkbox');
+  const cb = e.target.closest('.section-flag-checkbox');
   if (!cb) return;
-  const code = cb.getAttribute('data-code');
+  const sectionName = cb.getAttribute('data-section');
   const flag = cb.getAttribute('data-flag');
-  const r = findResponse(code);
-  if (r) r[flag] = cb.checked;
-  const noteFlag = flag === 'needsMaintenance' ? 'maintenanceNote' : flag === 'needsSupply' ? 'supplyNote' : null;
-  if (noteFlag) {
-    const ta = document.querySelector('.flag-note-textarea[data-flag="' + noteFlag + '"][data-code="' + code + '"]');
-    if (ta) {
-      ta.style.display = cb.checked ? 'block' : 'none';
-      if (cb.checked) ta.focus();
-    }
+  if (!state.draftRun.sectionFlags[sectionName]) state.draftRun.sectionFlags[sectionName] = {};
+  state.draftRun.sectionFlags[sectionName][flag] = cb.checked;
+  const wrap = cb.closest('.flag-item');
+  const ta = wrap ? wrap.querySelector('.section-flag-note') : null;
+  if (ta) {
+    ta.style.display = cb.checked ? 'block' : 'none';
+    if (cb.checked) ta.focus();
   }
 });
 
@@ -2722,7 +2737,7 @@ async function handleClickAction(t, e) {
             sectionName: section.name || item.category,
             isChild: item.isChild, parentCode: item.parentCode, parentText: item.parentText,
             parentGuidance: item.parentGuidance || '', parentLinks: item.parentLinks || [], parentPhotos: item.parentPhotos || [],
-            answer: null, notes: '', needsMaintenance: false, needsSupply: false, maintenanceNote: '', supplyNote: ''
+            answer: null, notes: ''
           });
         });
       });
@@ -2733,14 +2748,18 @@ async function handleClickAction(t, e) {
       id: uid('run'), templateId: tpl.id, templateName: tpl.name,
       locationId: state.selectedLocationId || '',
       locationName: state.selectedLocationName || '',
-      assessorName: '', date: todayISO(), responses, status: 'in-progress', createdAt: new Date().toISOString()
+      assessorName: '', date: todayISO(), responses, status: 'in-progress', createdAt: new Date().toISOString(),
+      sectionFlags: {}
     };
     render();
     return;
   }
   if (action === 'resume-draft') {
     const d = loadLocalDrafts().find(x => x.id === id);
-    if (d) { state.draftRun = d; state.takeStage = 'filling'; state.takeValidationAttempted = false; render(); }
+    if (d) {
+      if (!d.sectionFlags) d.sectionFlags = {};
+      state.draftRun = d; state.takeStage = 'filling'; state.takeValidationAttempted = false; render();
+    }
     return;
   }
   if (action === 'discard-draft') {
@@ -2809,7 +2828,8 @@ async function handleClickAction(t, e) {
 
     const score = computeScore(state.draftRun.responses);
     const failed = state.draftRun.responses.filter(r => isFailOption(r.answer));
-    const hasFlags = state.draftRun.responses.some(r => r.needsMaintenance || r.needsSupply);
+    const { maintenance: flaggedMaintenance, supply: flaggedSupply } = getSectionFlags(state.draftRun);
+    const hasFlags = flaggedMaintenance.length > 0 || flaggedSupply.length > 0;
     const shouldNotifySlack = failed.length > 0 || !!state.draftRun.generalNotes || hasFlags;
 
     const finishSubmit = async () => {
