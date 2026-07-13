@@ -710,6 +710,33 @@ function renderTakeInProgress() {
   `;
 }
 
+function flaggedFollowUpHTML(responses) {
+  const maint = responses.filter(r => r.needsMaintenance);
+  const supply = responses.filter(r => r.needsSupply);
+  if (!maint.length && !supply.length) return '';
+  return `
+    <section class="panel">
+      <h3>Flagged for follow-up</h3>
+      ${maint.length ? `
+        <div class="q-guidance" style="margin-bottom:8px;">
+          &#128295; <strong>Maintenance ticket:</strong>
+          <ul class="q-list">
+            ${maint.map(r => `<li class="q-row"><div class="q-main"><span class="q-code">${esc(r.code)}</span> ${esc(r.text)}${r.maintenanceNote ? `<div class="q-guidance">Note: ${esc(r.maintenanceNote)}</div>` : ''}</div></li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+      ${supply.length ? `
+        <div class="q-guidance">
+          &#128230; <strong>Supply request:</strong>
+          <ul class="q-list">
+            ${supply.map(r => `<li class="q-row"><div class="q-main"><span class="q-code">${esc(r.code)}</span> ${esc(r.text)}${r.supplyNote ? `<div class="q-guidance">Note: ${esc(r.supplyNote)}</div>` : ''}</div></li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+    </section>
+  `;
+}
+
 function renderTakeReview() {
   const run = state.draftRun;
   const score = computeScore(run.responses);
@@ -748,6 +775,8 @@ function renderTakeReview() {
       </section>
     `}
 
+    ${flaggedFollowUpHTML(run.responses)}
+
     <section class="panel">
       <h3>General notes ${failed.length === 0 ? '(optional)' : '(optional, added to the Slack summary)'}</h3>
       <textarea id="generalNotesInput" rows="3" placeholder="Anything else worth flagging&hellip;">${esc(run.generalNotes || '')}</textarea>
@@ -757,12 +786,14 @@ function renderTakeReview() {
       <button class="btn btn-ghost" data-action="back-to-filling">Back to assessment</button>
       <button class="btn btn-primary" data-action="confirm-submit">Confirm &amp; submit</button>
     </div>
-    <div class="hint">${failed.length > 0 ? 'This sends a Slack summary of the missed questions, then submits.' : 'A Slack summary only sends if you add a note above \u2014 otherwise this just submits.'}</div>
+    <div class="hint">${failed.length > 0 ? 'This sends a Slack summary of the missed questions, then submits.' : 'A Slack summary only sends if you add a note or flag something above \u2014 otherwise this just submits.'}</div>
   `;
 }
 
 function buildSlackPayload(run, score) {
   const failed = run.responses.filter(r => isFailOption(r.answer));
+  const maintenanceItems = run.responses.filter(r => r.needsMaintenance);
+  const supplyItems = run.responses.filter(r => r.needsSupply);
 
   const meta = 'Template: ' + run.templateName + '  |  Assessor: ' + (run.assessorName || 'Unnamed') + '  |  Date: ' + fmtDate(run.date);
 
@@ -772,9 +803,16 @@ function buildSlackPayload(run, score) {
     (r.notes ? '\n   _note: ' + r.notes + '_' : '')
   );
   const missedBlock = failed.length === 0 ? '' : '\n\n*Missed questions (' + failed.length + '):*\n' + missedLines.join('\n');
+
+  const maintenanceLines = maintenanceItems.map(r => '\u2022 ' + r.code + ' \u2014 ' + r.text + (r.maintenanceNote ? '\n   _note: ' + r.maintenanceNote + '_' : ''));
+  const maintenanceBlock = maintenanceItems.length ? '\n\n:wrench: *Maintenance ticket requested (' + maintenanceItems.length + '):*\n' + maintenanceLines.join('\n') : '';
+
+  const supplyLines = supplyItems.map(r => '\u2022 ' + r.code + ' \u2014 ' + r.text + (r.supplyNote ? '\n   _note: ' + r.supplyNote + '_' : ''));
+  const supplyBlock = supplyItems.length ? '\n\n:package: *Supply request submitted (' + supplyItems.length + '):*\n' + supplyLines.join('\n') : '';
+
   const notesBlock = run.generalNotes && run.generalNotes.trim() ? '\n\n*Additional notes:*\n' + run.generalNotes.trim() : '';
 
-  const text = meta + missedBlock + notesBlock;
+  const text = meta + missedBlock + maintenanceBlock + supplyBlock + notesBlock;
 
   return {
     text,
@@ -787,7 +825,11 @@ function buildSlackPayload(run, score) {
     criticalFails: score.criticalFails,
     missedCount: failed.length,
     missedSummary: missedLines.join('\n'),
-    generalNotes: run.generalNotes || ''
+    generalNotes: run.generalNotes || '',
+    maintenanceCount: maintenanceItems.length,
+    maintenanceSummary: maintenanceLines.join('\n'),
+    supplyCount: supplyItems.length,
+    supplySummary: supplyLines.join('\n')
   };
 }
 
@@ -915,6 +957,16 @@ function renderTakeItem(it) {
       <div class="notes-row">
         <button type="button" class="notes-toggle" data-action="toggle-notes" data-code="${esc(it.code)}">+ Add notes</button>
         <span class="note-required-flag" id="note-required-${esc(it.code)}" style="display:${needsNote ? 'inline' : 'none'}">Note required for a "No" answer</span>
+      </div>
+      <div class="flag-row">
+        <div class="flag-item">
+          <label class="check-inline"><input type="checkbox" class="flag-checkbox" data-flag="needsMaintenance" data-code="${esc(it.code)}" ${it.needsMaintenance ? 'checked' : ''} /> &#128295; Submit a maintenance ticket</label>
+          <textarea class="flag-note-textarea" data-flag="maintenanceNote" data-code="${esc(it.code)}" rows="2" placeholder="What does the ticket need to say?" style="display:${it.needsMaintenance ? 'block' : 'none'}">${esc(it.maintenanceNote || '')}</textarea>
+        </div>
+        <div class="flag-item">
+          <label class="check-inline"><input type="checkbox" class="flag-checkbox" data-flag="needsSupply" data-code="${esc(it.code)}" ${it.needsSupply ? 'checked' : ''} /> &#128230; Submit a supply request</label>
+          <textarea class="flag-note-textarea" data-flag="supplyNote" data-code="${esc(it.code)}" rows="2" placeholder="What's needed?" style="display:${it.needsSupply ? 'block' : 'none'}">${esc(it.supplyNote || '')}</textarea>
+        </div>
       </div>
       <div class="notes-input" id="notes-wrap-${esc(it.code)}" style="display:${(it.notes || needsNote) ? 'block' : 'none'}">
         <textarea rows="2" placeholder="Observations or corrective action&hellip;" data-code="${esc(it.code)}" class="notes-textarea">${esc(it.notes || '')}</textarea>
@@ -1212,6 +1264,16 @@ window.__tplFilter = function () {
 /* ---- Arrange tab: freely reorderable, drag-and-drop sections ---- */
 
 function reconcileSections() {
+  // If the Arrange page is currently on screen, it's the source of
+  // truth for anything that only ever touches the DOM directly (drag
+  // reorders, the per-section "add question" search) — sectionsDraft
+  // itself is only updated at a few specific moments, so without this
+  // sync, any *other* re-render (like saving an edited question) would
+  // rebuild the view from stale data and treat those changes as if
+  // they'd never happened.
+  if (document.getElementById('sectionsContainer')) {
+    sectionsDraft = readSectionsFromDom();
+  }
   const selected = window.__templateSelection;
   sectionsDraft.forEach(s => { s.questionIds = s.questionIds.filter(id => selected.has(id)); });
   const placed = new Set(sectionsDraft.flatMap(s => s.questionIds));
@@ -1269,6 +1331,7 @@ function renderSectionBlock(s) {
               <span class="q-code">${esc(qid)}</span>
               <span class="arrange-text">${esc(q.text)}</span>
               <button type="button" class="icon-btn" data-action="edit-question" data-id="${esc(qid)}" title="Edit question">&#9998;</button>
+              <button type="button" class="icon-btn" data-action="remove-question-from-template" data-qid="${esc(qid)}" title="Remove from this template">&times;</button>
             </li>
           `;
         }).join('')}
@@ -1917,6 +1980,7 @@ function renderRunDetail() {
         <p style="white-space:pre-wrap;font-size:.88rem;margin:0;">${esc(run.generalNotes)}</p>
       </section>
     ` : ''}
+    ${flaggedFollowUpHTML(run.responses)}
     ${failed.length > 0 ? `
       <section class="panel">
         <h3>Items needing attention</h3>
@@ -2288,12 +2352,37 @@ function render() {
 ========================================================================= */
 
 document.addEventListener('input', (e) => {
+  const flagTa = e.target.closest('.flag-note-textarea');
+  if (flagTa) {
+    const code = flagTa.getAttribute('data-code');
+    const flag = flagTa.getAttribute('data-flag');
+    const r = findResponse(code);
+    if (r) r[flag] = flagTa.value;
+    return;
+  }
   const ta = e.target.closest('.notes-textarea');
   if (!ta) return;
   const code = ta.getAttribute('data-code');
   const r = findResponse(code);
   if (r) r.notes = ta.value;
   refreshItemState(code);
+});
+
+document.addEventListener('change', (e) => {
+  const cb = e.target.closest('.flag-checkbox');
+  if (!cb) return;
+  const code = cb.getAttribute('data-code');
+  const flag = cb.getAttribute('data-flag');
+  const r = findResponse(code);
+  if (r) r[flag] = cb.checked;
+  const noteFlag = flag === 'needsMaintenance' ? 'maintenanceNote' : flag === 'needsSupply' ? 'supplyNote' : null;
+  if (noteFlag) {
+    const ta = document.querySelector('.flag-note-textarea[data-flag="' + noteFlag + '"][data-code="' + code + '"]');
+    if (ta) {
+      ta.style.display = cb.checked ? 'block' : 'none';
+      if (cb.checked) ta.focus();
+    }
+  }
 });
 
 document.addEventListener('change', async (e) => {
@@ -2507,6 +2596,15 @@ async function handleClickAction(t, e) {
     render();
     return;
   }
+  if (action === 'remove-question-from-template') {
+    const qid = t.getAttribute('data-qid');
+    window.__templateSelection.delete(qid);
+    const row = t.closest('.arrange-row');
+    if (row) row.remove();
+    const selCount = document.getElementById('tplSelCount');
+    if (selCount) selCount.textContent = window.__templateSelection.size + ' selected';
+    return;
+  }
   if (action === 'add-question-to-section') {
     const sectionId = t.getAttribute('data-section-id');
     const qid = t.getAttribute('data-qid');
@@ -2520,7 +2618,8 @@ async function handleClickAction(t, e) {
       li.setAttribute('data-qid', qid);
       li.innerHTML = '<span class="drag-handle">&#8942;&#8942;</span>' + badgeHTML(q.severity) +
         ' <span class="q-code">' + esc(qid) + '</span><span class="arrange-text">' + esc(q.text) + '</span>' +
-        '<button type="button" class="icon-btn" data-action="edit-question" data-id="' + esc(qid) + '" title="Edit question">&#9998;</button>';
+        '<button type="button" class="icon-btn" data-action="edit-question" data-id="' + esc(qid) + '" title="Edit question">&#9998;</button>' +
+        '<button type="button" class="icon-btn" data-action="remove-question-from-template" data-qid="' + esc(qid) + '" title="Remove from this template">&times;</button>';
       ul.appendChild(li);
     }
     const input = document.querySelector('.section-add-search[data-section-id="' + sectionId + '"]');
@@ -2623,7 +2722,7 @@ async function handleClickAction(t, e) {
             sectionName: section.name || item.category,
             isChild: item.isChild, parentCode: item.parentCode, parentText: item.parentText,
             parentGuidance: item.parentGuidance || '', parentLinks: item.parentLinks || [], parentPhotos: item.parentPhotos || [],
-            answer: null, notes: ''
+            answer: null, notes: '', needsMaintenance: false, needsSupply: false, maintenanceNote: '', supplyNote: ''
           });
         });
       });
@@ -2710,7 +2809,8 @@ async function handleClickAction(t, e) {
 
     const score = computeScore(state.draftRun.responses);
     const failed = state.draftRun.responses.filter(r => isFailOption(r.answer));
-    const shouldNotifySlack = failed.length > 0 || !!state.draftRun.generalNotes;
+    const hasFlags = state.draftRun.responses.some(r => r.needsMaintenance || r.needsSupply);
+    const shouldNotifySlack = failed.length > 0 || !!state.draftRun.generalNotes || hasFlags;
 
     const finishSubmit = async () => {
       const finished = sanitizeForFirestore({ ...state.draftRun, status: 'completed', score, completedAt: new Date().toISOString() });
