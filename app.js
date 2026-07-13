@@ -648,7 +648,7 @@ function renderTake() {
       <div class="template-grid">
         ${availableTemplates.map(t => `
           <div class="template-card clickable" data-action="start-run" data-id="${t.id}">
-            <h3>${esc(t.name)} ${t.type === 'dynamic' ? '<span class="pill-outline" title="Auto-updates as matching questions are added or removed">&#9889; Auto-updating</span>' : ''}</h3>
+            <h3>${esc(t.name)} ${templateDynamicBadgeHTML(t)}</h3>
             <p>${esc(t.description || '')}</p>
             <div class="template-meta">${templateQuestionCount(t)} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
           </div>
@@ -1201,9 +1201,9 @@ function renderTemplatesTab() {
             : t.locationIds.map(id => { const l = state.locations.find(x => x.id === id); return l ? l.name : '(deleted location)'; }).join(', ');
           return `
           <div class="template-card">
-            <h3>${esc(t.name)} ${t.type === 'dynamic' ? '<span class="pill-outline" title="Auto-updates as matching questions are added or removed">&#9889; Auto-updating</span>' : ''}</h3>
+            <h3>${esc(t.name)} ${templateDynamicBadgeHTML(t)}</h3>
             <p>${esc(t.description || '')}</p>
-            <div class="template-meta">${templateQuestionCount(t)} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}${t.type === 'dynamic' ? ' &middot; ' + (t.severityFilter || []).join('/') : ''}</div>
+            <div class="template-meta">${templateQuestionCount(t)} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}${t.type === 'dynamic' && t.dynamicMode !== 'recentMisses' ? ' &middot; ' + (t.severityFilter || []).join('/') : ''}</div>
             <div class="template-meta" style="${restricted ? 'color:var(--medium);' : ''}">${restricted ? '&#128205; ' : '&#127760; '}${esc(scopeLabel)}</div>
             <div class="template-actions">
               <button class="btn btn-ghost btn-sm" data-action="edit-template" data-id="${esc(t.id)}">Edit</button>
@@ -1221,12 +1221,14 @@ let sectionsDraft = [];
 let sortableInstances = [];
 
 function renderTemplateEditor() {
-  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [], locationIds: [], type: 'fixed', severityFilter: [] } : state.editingTemplate;
+  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [], locationIds: [], type: 'fixed', severityFilter: [], dynamicMode: 'severity', lookbackDays: 30 } : state.editingTemplate;
   const frequencies = ['Daily', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'As Needed'];
   const hasRestriction = (t.locationIds || []).length > 0;
   const isDynamic = t.type === 'dynamic';
+  const dynamicMode = t.dynamicMode || 'severity';
   const currentSeverityFilter = t.severityFilter || [];
   const dynamicCount = state.questions.filter(q => currentSeverityFilter.includes(q.severity)).length;
+  const lookbackDays = t.lookbackDays || 30;
 
   return `
     <div class="panel">
@@ -1257,16 +1259,31 @@ function renderTemplateEditor() {
         <input type="radio" name="tplType" id="tplTypeFixed" ${!isDynamic ? 'checked' : ''} onchange="window.__toggleTplType()" /> Fixed list of questions
       </label>
       <label class="check-inline">
-        <input type="radio" name="tplType" id="tplTypeDynamic" ${isDynamic ? 'checked' : ''} onchange="window.__toggleTplType()" /> Dynamic &mdash; auto-include by severity
+        <input type="radio" name="tplType" id="tplTypeDynamic" ${isDynamic ? 'checked' : ''} onchange="window.__toggleTplType()" /> Dynamic &mdash; auto-updating
       </label>
       <div id="tplDynamicOptions" style="display:${isDynamic ? 'block' : 'none'};margin-top:10px;padding:10px;background:var(--page-bg);border-radius:6px;">
-        <p style="color:var(--ink-soft);font-size:.8rem;margin:0 0 8px;">Automatically includes every question at these severities &mdash; including ones added to the library later, no need to come back and edit this template.</p>
-        ${['IMMEDIATE', 'HIGH', 'MEDIUM', 'LOW'].map(sev => `
-          <label class="check-inline" style="display:block;margin-bottom:6px;">
-            <input type="checkbox" class="tpl-severity-checkbox" value="${sev}" ${currentSeverityFilter.includes(sev) ? 'checked' : ''} onchange="window.__updateDynamicCount()" /> ${sev}
-          </label>
-        `).join('')}
-        <div class="pill-outline" id="tplDynamicCount">${dynamicCount} question${dynamicCount === 1 ? '' : 's'} currently match</div>
+        <label class="check-inline" style="margin-bottom:6px;">
+          <input type="radio" name="tplDynamicMode" id="tplModeSeverity" ${dynamicMode !== 'recentMisses' ? 'checked' : ''} onchange="window.__toggleDynamicMode()" /> By severity level
+        </label>
+        <label class="check-inline">
+          <input type="radio" name="tplDynamicMode" id="tplModeRecentMisses" ${dynamicMode === 'recentMisses' ? 'checked' : ''} onchange="window.__toggleDynamicMode()" /> Recently missed questions
+        </label>
+
+        <div id="tplSeverityOptions" style="display:${dynamicMode !== 'recentMisses' ? 'block' : 'none'};margin-top:10px;">
+          <p style="color:var(--ink-soft);font-size:.8rem;margin:0 0 8px;">Automatically includes every question at these severities &mdash; including ones added to the library later, no need to come back and edit this template.</p>
+          ${['IMMEDIATE', 'HIGH', 'MEDIUM', 'LOW'].map(sev => `
+            <label class="check-inline" style="display:block;margin-bottom:6px;">
+              <input type="checkbox" class="tpl-severity-checkbox" value="${sev}" ${currentSeverityFilter.includes(sev) ? 'checked' : ''} onchange="window.__updateDynamicCount()" /> ${sev}
+            </label>
+          `).join('')}
+          <div class="pill-outline" id="tplDynamicCount">${dynamicCount} question${dynamicCount === 1 ? '' : 's'} currently match</div>
+        </div>
+
+        <div id="tplRecentMissesOptions" style="display:${dynamicMode === 'recentMisses' ? 'block' : 'none'};margin-top:10px;">
+          <p style="color:var(--ink-soft);font-size:.8rem;margin:0 0 8px;">Automatically includes every question that was answered "No" at <strong>the location taking this assessment</strong> within the lookback window &mdash; a quick re-check to confirm recent problems actually got fixed. Computed fresh each time it's taken, so the count depends on which location and can't be previewed here.</p>
+          <label class="field-label" style="margin-top:0;">Lookback window (days)</label>
+          <input type="number" id="tplLookbackDays" min="1" max="365" value="${lookbackDays}" style="max-width:120px;" />
+        </div>
       </div>
     </div>
     <div id="tplTabsSection" style="display:${isDynamic ? 'none' : 'block'};">
@@ -1828,8 +1845,41 @@ function initReportCharts() {
   }
 }
 
+function findTopLevelIdForCode(code) {
+  const direct = state.questions.find(q => q.id === code);
+  if (direct) return code;
+  const parent = state.questions.find(q => (q.children || []).some(c => c.id === code));
+  return parent ? parent.id : null;
+}
+
+function computeRecentMissesQuestionIds(tpl) {
+  if (!state.selectedLocationId) return [];
+  const cutoff = subtractDays(todayISO(), tpl.lookbackDays || 30);
+  const topLevelIds = new Set();
+  (state.recentFailures || []).forEach(f => {
+    if (f.locationId !== state.selectedLocationId) return;
+    if (f.date < cutoff) return;
+    const topId = findTopLevelIdForCode(f.questionCode);
+    if (topId) topLevelIds.add(topId);
+  });
+  return Array.from(topLevelIds);
+}
+
+function templateDynamicBadgeHTML(t) {
+  if (t.type !== 'dynamic') return '';
+  const label = t.dynamicMode === 'recentMisses'
+    ? '&#9889; Auto-updating (recent misses, ' + (t.lookbackDays || 30) + 'd)'
+    : '&#9889; Auto-updating (by severity)';
+  return `<span class="pill-outline" title="Auto-updates as matching questions are added, removed, or newly missed">${label}</span>`;
+}
+
 function templateQuestionCount(tpl) {
-  if (tpl.type === 'dynamic') return state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).length;
+  if (tpl.type === 'dynamic') {
+    if (tpl.dynamicMode === 'recentMisses') {
+      return state.selectedLocationId ? computeRecentMissesQuestionIds(tpl).length : '\u2014';
+    }
+    return state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).length;
+  }
   return (tpl.questionIds || []).length;
 }
 
@@ -2330,6 +2380,14 @@ window.__toggleTplType = function () {
   if (tabs) tabs.style.display = dynamic ? 'none' : 'block';
 };
 
+window.__toggleDynamicMode = function () {
+  const recentMisses = document.getElementById('tplModeRecentMisses').checked;
+  const sevBox = document.getElementById('tplSeverityOptions');
+  const missesBox = document.getElementById('tplRecentMissesOptions');
+  if (sevBox) sevBox.style.display = recentMisses ? 'none' : 'block';
+  if (missesBox) missesBox.style.display = recentMisses ? 'block' : 'none';
+};
+
 window.__updateDynamicCount = function () {
   const checked = Array.from(document.querySelectorAll('.tpl-severity-checkbox:checked')).map(el => el.value);
   const count = state.questions.filter(q => checked.includes(q.severity)).length;
@@ -2696,9 +2754,15 @@ async function handleClickAction(t, e) {
     };
 
     if (isDynamic) {
-      const severityFilter = Array.from(document.querySelectorAll('.tpl-severity-checkbox:checked')).map(el => el.value);
-      if (severityFilter.length === 0) { alert('Select at least one severity level for a dynamic template.'); return; }
-      await saveTemplateToDb({ ...baseFields, type: 'dynamic', severityFilter, sections: [], questionIds: [] });
+      const recentMisses = document.getElementById('tplModeRecentMisses').checked;
+      if (recentMisses) {
+        const lookbackDays = parseInt(document.getElementById('tplLookbackDays').value, 10) || 30;
+        await saveTemplateToDb({ ...baseFields, type: 'dynamic', dynamicMode: 'recentMisses', lookbackDays, severityFilter: [], sections: [], questionIds: [] });
+      } else {
+        const severityFilter = Array.from(document.querySelectorAll('.tpl-severity-checkbox:checked')).map(el => el.value);
+        if (severityFilter.length === 0) { alert('Select at least one severity level for a dynamic template.'); return; }
+        await saveTemplateToDb({ ...baseFields, type: 'dynamic', dynamicMode: 'severity', severityFilter, lookbackDays: 30, sections: [], questionIds: [] });
+      }
     } else {
       if (window.__templateSelection.size === 0) { alert('Select at least one question.'); return; }
       reconcileSections();
@@ -2844,9 +2908,21 @@ async function handleClickAction(t, e) {
   if (action === 'start-run') {
     const tpl = state.templates.find(x => x.id === id);
     if (!tpl) return;
+    if (tpl.type === 'dynamic' && tpl.dynamicMode === 'recentMisses') {
+      const ids = computeRecentMissesQuestionIds(tpl);
+      if (ids.length === 0) {
+        alert('No recently-missed questions at this location in the last ' + (tpl.lookbackDays || 30) + ' days \u2014 nothing to re-check right now.');
+        return;
+      }
+    }
     const responses = [];
+    const dynamicIds = tpl.type === 'dynamic'
+      ? (tpl.dynamicMode === 'recentMisses'
+        ? computeRecentMissesQuestionIds(tpl)
+        : state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).map(q => q.id))
+      : null;
     const sectionList = tpl.type === 'dynamic'
-      ? [{ id: 'dynamic', name: null, questionIds: state.questions.filter(q => (tpl.severityFilter || []).includes(q.severity)).map(q => q.id) }]
+      ? [{ id: 'dynamic', name: null, questionIds: dynamicIds }]
       : (tpl.sections && tpl.sections.length)
         ? tpl.sections
         : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
