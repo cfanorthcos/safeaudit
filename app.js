@@ -621,6 +621,7 @@ function renderTake() {
   }
 
   const drafts = loadLocalDrafts();
+  const availableTemplates = state.templates.filter(t => !(t.locationIds && t.locationIds.length) || t.locationIds.includes(state.selectedLocationId));
 
   return `
     ${pageHeaderHTML('Take Assessment', 'Choose a template')}
@@ -641,9 +642,9 @@ function renderTake() {
         </ul>
       </section>
     ` : ''}
-    ${state.templates.length === 0 ? emptyStateHTML('No templates yet. An admin needs to build one in Settings.') : `
+    ${availableTemplates.length === 0 ? emptyStateHTML(state.templates.length === 0 ? 'No templates yet. An admin needs to build one in Settings.' : 'No templates are assigned to this location yet.') : `
       <div class="template-grid">
-        ${state.templates.map(t => `
+        ${availableTemplates.map(t => `
           <div class="template-card clickable" data-action="start-run" data-id="${t.id}">
             <h3>${esc(t.name)}</h3>
             <p>${esc(t.description || '')}</p>
@@ -1070,17 +1071,24 @@ function renderTemplatesTab() {
     </div>
     ${state.templates.length === 0 ? emptyStateHTML('No templates yet.') : `
       <div class="template-grid">
-        ${state.templates.map(t => `
+        ${state.templates.map(t => {
+          const restricted = (t.locationIds || []).length > 0;
+          const scopeLabel = !restricted
+            ? 'All locations'
+            : t.locationIds.map(id => { const l = state.locations.find(x => x.id === id); return l ? l.name : '(deleted location)'; }).join(', ');
+          return `
           <div class="template-card">
             <h3>${esc(t.name)}</h3>
             <p>${esc(t.description || '')}</p>
             <div class="template-meta">${(t.questionIds || []).length} questions ${t.frequency ? '&middot; ' + esc(t.frequency) : ''}</div>
+            <div class="template-meta" style="${restricted ? 'color:var(--medium);' : ''}">${restricted ? '&#128205; ' : '&#127760; '}${esc(scopeLabel)}</div>
             <div class="template-actions">
               <button class="btn btn-ghost btn-sm" data-action="edit-template" data-id="${esc(t.id)}">Edit</button>
               <button class="btn btn-ghost btn-sm" data-action="delete-template" data-id="${esc(t.id)}">Delete</button>
             </div>
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
     `}
   `;
@@ -1090,8 +1098,9 @@ let sectionsDraft = [];
 let sortableInstances = [];
 
 function renderTemplateEditor() {
-  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [] } : state.editingTemplate;
+  const t = state.editingTemplate === 'new' ? { name: '', description: '', frequency: 'Daily', questionIds: [], locationIds: [] } : state.editingTemplate;
   const frequencies = ['Daily', 'Weekly', 'Bi-Weekly', 'Monthly', 'Quarterly', 'As Needed'];
+  const hasRestriction = (t.locationIds || []).length > 0;
 
   return `
     <div class="panel">
@@ -1103,6 +1112,20 @@ function renderTemplateEditor() {
       <select id="tplFrequency">
         ${frequencies.map(f => `<option value="${f}" ${(t.frequency || 'Daily') === f ? 'selected' : ''}>${f}</option>`).join('')}
       </select>
+      <label class="field-label">Available to</label>
+      <label class="check-inline" style="margin-bottom:6px;">
+        <input type="radio" name="tplAvailability" id="tplAvailAll" ${!hasRestriction ? 'checked' : ''} onchange="window.__toggleTplAvailability()" /> All locations
+      </label>
+      <label class="check-inline">
+        <input type="radio" name="tplAvailability" id="tplAvailSpecific" ${hasRestriction ? 'checked' : ''} onchange="window.__toggleTplAvailability()" /> Specific locations only
+      </label>
+      <div id="tplLocationCheckboxes" style="display:${hasRestriction ? 'block' : 'none'};margin-top:10px;padding:10px;background:var(--page-bg);border-radius:6px;">
+        ${state.locations.length === 0 ? '<p style="color:var(--ink-soft);font-size:.82rem;margin:0;">No locations set up yet.</p>' : state.locations.map(l => `
+          <label class="check-inline" style="display:flex;margin-bottom:6px;">
+            <input type="checkbox" class="tpl-location-checkbox" value="${esc(l.id)}" ${(t.locationIds || []).includes(l.id) ? 'checked' : ''} /> ${esc(l.name)}
+          </label>
+        `).join('')}
+      </div>
     </div>
     <div class="filter-bar">
       <button class="btn ${state.templateEditorTab !== 'arrange' ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="template-editor-tab" data-tab="select">1. Choose questions</button>
@@ -1729,7 +1752,7 @@ function buildReportsBodyHTML(search, locFilter, statusFilter, dateFrom, dateTo)
       <section class="panel rating-panel">
         ${safeRatingGaugeHTML(ratingInfo.rating, 170)}
         <div class="rating-details">
-          <h3>SAFE Audit Rating (Estimate) </h3>
+          <h3>SAFE Audit Rating</h3>
           <p>${ratingReasonHTML(ratingInfo)}</p>
         </div>
       </section>
@@ -1918,6 +1941,21 @@ function renderRunDetail() {
    MODALS
 ========================================================================= */
 
+function rerenderModalKeepingScroll(scrollToSelector) {
+  const modalEl = document.querySelector('.modal');
+  const prevScroll = modalEl ? modalEl.scrollTop : 0;
+  renderModal();
+  requestAnimationFrame(() => {
+    const newModalEl = document.querySelector('.modal');
+    if (!newModalEl) return;
+    if (scrollToSelector) {
+      const target = newModalEl.querySelector(scrollToSelector);
+      if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    }
+    newModalEl.scrollTop = prevScroll;
+  });
+}
+
 function renderModal() {
   if (state.showingSlackAnim || state.showingLightbox) return;
   const root = document.getElementById('modalRoot');
@@ -2069,6 +2107,12 @@ window.__toggleNewCategoryInput = function () {
   const sel = document.getElementById('qCategory');
   const inp = document.getElementById('qNewCategoryInput');
   if (inp && sel) inp.style.display = sel.value === '__new__' ? 'block' : 'none';
+};
+
+window.__toggleTplAvailability = function () {
+  const specific = document.getElementById('tplAvailSpecific').checked;
+  const box = document.getElementById('tplLocationCheckboxes');
+  if (box) box.style.display = specific ? 'block' : 'none';
 };
 
 function questionModalHTML() {
@@ -2274,7 +2318,7 @@ async function handleClickAction(t, e) {
     const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
     target.links = target.links || [];
     target.links.push({ label: '', url: '' });
-    renderModal();
+    rerenderModalKeepingScroll('.links-editor[data-scope="' + scope + '"] .link-row:last-child');
     return;
   }
   if (action === 'remove-link') {
@@ -2282,7 +2326,7 @@ async function handleClickAction(t, e) {
     const scope = t.getAttribute('data-scope');
     const target = scope === 'parent' ? qDraft : qDraft.children[parseInt(scope.replace('child-', ''), 10)];
     target.links.splice(parseInt(t.getAttribute('data-index'), 10), 1);
-    renderModal();
+    rerenderModalKeepingScroll();
     return;
   }
   if (action === 'remove-photo') {
@@ -2292,20 +2336,20 @@ async function handleClickAction(t, e) {
     const idx = parseInt(t.getAttribute('data-index'), 10);
     const [removed] = target.photos.splice(idx, 1);
     if (removed) deletePhotoFromStorage(removed.path);
-    renderModal();
+    rerenderModalKeepingScroll();
     return;
   }
   if (action === 'add-child') {
     syncQuestionDraftFromDom();
     qDraft.children.push({ id: '', text: '', guidance: '', options: ['Yes', 'No'], links: [] });
-    renderModal();
+    rerenderModalKeepingScroll('.child-editor-row:last-child');
     return;
   }
   if (action === 'remove-child') {
     syncQuestionDraftFromDom();
     const [removed] = qDraft.children.splice(parseInt(t.getAttribute('data-index'), 10), 1);
     if (removed && removed.photos) removed.photos.forEach(p => deletePhotoFromStorage(p.path));
-    renderModal();
+    rerenderModalKeepingScroll();
     return;
   }
   if (action === 'save-question') {
@@ -2360,13 +2404,19 @@ async function handleClickAction(t, e) {
     reconcileSections();
     const sections = readSectionsFromDom(); // picks up live DOM order if the Arrange tab is mounted, else falls back to sectionsDraft
     const flatIds = sections.flatMap(s => s.questionIds);
+    const isSpecific = document.getElementById('tplAvailSpecific').checked;
+    const locationIds = isSpecific
+      ? Array.from(document.querySelectorAll('.tpl-location-checkbox:checked')).map(el => el.value)
+      : [];
+    if (isSpecific && locationIds.length === 0) { alert('Select at least one location, or switch back to "All locations".'); return; }
     await saveTemplateToDb({
       id: id || undefined,
       name,
       description: document.getElementById('tplDesc').value.trim(),
       frequency: document.getElementById('tplFrequency').value,
       sections: sections.map(s => ({ id: s.id, name: s.name, questionIds: s.questionIds })),
-      questionIds: flatIds
+      questionIds: flatIds,
+      locationIds
     });
     state.editingTemplate = null; sectionsDraft = []; render();
     return;
@@ -2415,8 +2465,19 @@ async function handleClickAction(t, e) {
   if (action === 'new-location') { state.editingLocation = 'new'; renderModal(); return; }
   if (action === 'edit-location') { state.editingLocation = state.locations.find(x => x.id === id); renderModal(); return; }
   if (action === 'delete-location') {
-    if (!confirm('Delete this location?')) return;
+    const affectedTemplates = state.templates.filter(t => (t.locationIds || []).includes(id));
+    let msg = 'Delete this location?';
+    if (affectedTemplates.length > 0) {
+      const willBecomeUnrestricted = affectedTemplates.filter(t => t.locationIds.length === 1);
+      msg += ' ' + affectedTemplates.length + ' template(s) are assigned to it.' +
+        (willBecomeUnrestricted.length ? ' ' + willBecomeUnrestricted.length + ' of those will become available to ALL locations, since this is their only assigned location.' : '');
+    }
+    if (!confirm(msg)) return;
     await deleteLocationFromDb(id);
+    for (const t of affectedTemplates) {
+      const nextLocationIds = t.locationIds.filter(x => x !== id);
+      updateDoc(doc(db, 'templates', t.id), sanitizeForFirestore({ locationIds: nextLocationIds })).catch(err => console.error('Failed to update template location list', err));
+    }
     return;
   }
   if (action === 'add-category') {
