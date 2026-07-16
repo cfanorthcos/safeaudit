@@ -36,6 +36,7 @@ const state = {
   runs: [],
   runsLoaded: false,
   recentFailures: [],
+  recentFailuresError: false,
   settingsTab: 'library',
   activeRunId: null,
   draftRun: null,
@@ -48,7 +49,9 @@ const state = {
   takeValidationAttempted: false,
   templateEditorTab: 'arrange',
   showingLightbox: false,
-  pendingSectionForNewQuestion: null
+  pendingSectionForNewQuestion: null,
+  showingFeedback: false,
+  feedbackSent: false
 };
 
 /* =========================================================================
@@ -266,8 +269,13 @@ function subscribeRecentFailures() {
     const list = [];
     snap.forEach(d => list.push({ id: d.id, ...d.data() }));
     state.recentFailures = list;
+    state.recentFailuresError = false;
     render();
-  }, err => console.error('recentFailures listener error', err));
+  }, err => {
+    console.error('recentFailures listener error', err);
+    state.recentFailuresError = true;
+    render();
+  });
 }
 
 let runsUnsub = null;
@@ -451,10 +459,11 @@ function renderNav() {
   `).join('');
 
   const foot = document.getElementById('sidebarFoot');
+  const feedbackLink = `<button data-action="open-feedback" style="margin-top:8px;">&#128172; Feedback / report an issue</button>`;
   if (state.isAdmin) {
-    foot.innerHTML = `<div>Signed in as admin</div><button data-action="logout">Sign out</button>`;
+    foot.innerHTML = `<div>Signed in as admin</div><button data-action="logout">Sign out</button>${feedbackLink}`;
   } else {
-    foot.innerHTML = '';
+    foot.innerHTML = feedbackLink;
   }
 }
 
@@ -565,6 +574,11 @@ function renderDashboard() {
 
   return `
     ${pageHeaderHTML('Overview', 'Dashboard')}
+    ${state.recentFailuresError ? `
+      <div class="callout callout-danger">
+        <span>&#9888;</span> Can't read the repeat-tracking data (Firestore permission error) &mdash; "repeat issue" badges and the "Recently missed questions" dynamic template won't work until this is fixed. Check that <code>firestore.rules</code> has a <code>recentFailures</code> block published in Firebase Console -> Firestore Database -> Rules.
+      </div>
+    ` : ''}
     <div class="stat-grid">
       ${statCardHTML('Questions in library', state.questions.length)}
       ${statCardHTML('Locations', state.locations.length)}
@@ -1472,11 +1486,18 @@ function readSectionsFromDom() {
   const blocks = document.querySelectorAll('#sectionsContainer .section-block');
   if (!blocks.length) return sectionsDraft;
   const next = [];
+  const seen = new Set();
   blocks.forEach(block => {
     const id = block.getAttribute('data-section-id');
     const nameInput = block.querySelector('.section-name-input');
     const name = id === '__unassigned__' ? 'Unassigned' : (nameInput ? nameInput.value.trim() : '');
-    const qids = Array.from(block.querySelectorAll('.arrange-row')).map(r => r.getAttribute('data-qid'));
+    const qids = [];
+    block.querySelectorAll('.arrange-row').forEach(r => {
+      const qid = r.getAttribute('data-qid');
+      if (seen.has(qid)) return; // a question should never appear in more than one section
+      seen.add(qid);
+      qids.push(qid);
+    });
     next.push({ id, name, questionIds: qids });
   });
   return next;
@@ -2220,6 +2241,7 @@ function renderModal() {
   }
   if (state.editingQuestion) { root.innerHTML = questionModalHTML(); return; }
   if (state.editingLocation) { root.innerHTML = locationModalHTML(); return; }
+  if (state.showingFeedback) { root.innerHTML = feedbackModalHTML(); return; }
   root.innerHTML = '';
 }
 
@@ -2496,6 +2518,45 @@ function locationModalHTML() {
   `;
 }
 
+function feedbackModalHTML() {
+  if (state.feedbackSent) {
+    return `
+      <div class="modal-overlay" data-action="close-modal-overlay">
+        <div class="modal">
+          <div class="modal-header"><h3>Thanks!</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
+          <div class="modal-body" style="text-align:center;padding:30px 20px;">
+            <p style="font-size:.9rem;">Sent. Appreciate you flagging it.</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-primary" data-action="close-modal">Done</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="modal-overlay" data-action="close-modal-overlay">
+      <div class="modal">
+        <div class="modal-header"><h3>Feedback</h3><button class="icon-btn" data-action="close-modal">&times;</button></div>
+        <div class="modal-body">
+          <label class="field-label">Type</label>
+          <label class="check-inline" style="margin-bottom:6px;"><input type="radio" name="fbType" id="fbTypeBug" checked /> Something's broken</label>
+          <label class="check-inline"><input type="radio" name="fbType" id="fbTypeIdea" /> I wish it could do this</label>
+          <label class="field-label">Details</label>
+          <textarea id="fbMessage" rows="4" placeholder="What happened, or what you'd like to see&hellip;"></textarea>
+          <label class="field-label">Your name (optional)</label>
+          <input id="fbName" placeholder="So we can follow up if needed" />
+          <div class="modal-error" id="fbError"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-action="close-modal">Cancel</button>
+          <button class="btn btn-primary" data-action="submit-feedback">Send</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 /* =========================================================================
    MASTER RENDER
 ========================================================================= */
@@ -2638,6 +2699,39 @@ async function handleClickAction(t, e) {
     if (action === 'close-modal-overlay' && e.target !== t) return;
     state.showPasswordModal = false; state.editingQuestion = null; state.editingLocation = null; qDraft = null;
     state.pendingSectionForNewQuestion = null;
+    state.showingFeedback = false; state.feedbackSent = false;
+    renderModal();
+    return;
+  }
+  if (action === 'open-feedback') {
+    state.feedbackSent = false;
+    state.showingFeedback = true;
+    renderModal();
+    return;
+  }
+  if (action === 'submit-feedback') {
+    const message = document.getElementById('fbMessage').value.trim();
+    const errEl = document.getElementById('fbError');
+    if (!message) { if (errEl) errEl.textContent = 'Enter some details first.'; return; }
+    const type = document.getElementById('fbTypeIdea').checked ? 'idea' : 'bug';
+    const payload = {
+      type,
+      message,
+      submittedBy: document.getElementById('fbName').value.trim(),
+      location: state.selectedLocationName || '',
+      page: state.view,
+      isAdmin: state.isAdmin,
+      date: todayISO(),
+      timestamp: new Date().toISOString()
+    };
+    try {
+      await sendToZapierWebhook(payload, window.ZAPIER_FEEDBACK_WEBHOOK_URL);
+    } catch (err) {
+      console.error('Feedback send failed', err);
+      if (errEl) errEl.textContent = "Couldn't send that — check your connection and try again.";
+      return;
+    }
+    state.feedbackSent = true;
     renderModal();
     return;
   }
@@ -2939,8 +3033,11 @@ async function handleClickAction(t, e) {
       : (tpl.sections && tpl.sections.length)
         ? tpl.sections
         : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
+    const seenTopLevelIds = new Set();
     sectionList.forEach(section => {
       section.questionIds.forEach(qid => {
+        if (seenTopLevelIds.has(qid)) return; // guard against a question ending up in the template twice
+        seenTopLevelIds.add(qid);
         const q = state.questions.find(x => x.id === qid);
         if (!q) return;
         flattenAnswerable(q).forEach(item => {
