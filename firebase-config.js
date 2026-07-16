@@ -36,7 +36,7 @@ window.ADMIN_EMAIL = "admin@opshub.internal";
 // your Zapier task quota. It's a low-stakes exposure (worst case is
 // spam messages in one Slack channel, not access to your data), but
 // it's real. See SETUP.md for how to create this in Zapier.
-window.ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/10599539/4ugb54p/";
+window.ZAPIER_WEBHOOK_URL = "REPLACE_ME";
 
 // All submission data (SAFE audit summary, plus maintenance/supply
 // flags as separate fields) goes to this one webhook. Since you're on
@@ -44,3 +44,7 @@ window.ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/10599539/4ugb5
 // webhook URLs — e.g. a path that only continues if
 // `maintenanceCount > 0`, another for `supplyCount > 0`, so each can
 // route to a different destination from the same Zap. See SETUP.md.
+
+// Feedback / bug reports submitted from within the app (the small
+// "Feedback" link in the sidebar, visible to everyone, not just admins).
+window.ZAPIER_FEEDBACK_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/10599539/44o2hlq/";
