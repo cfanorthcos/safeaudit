@@ -2368,16 +2368,55 @@ async function performQuestionSave() {
   const isNewQuestion = state.editingQuestion === 'new';
   if (!qDraft.id) qDraft.id = uid('q');
   if (!qDraft.category || !qDraft.text.trim()) { alert('Category and question text are required.'); return null; }
-  if (isNewQuestion && state.questions.some(q => q.id === qDraft.id)) {
-    alert('A question with that code already exists. Use a different code or edit the existing one.');
-    return null;
-  }
+
   if (!state.categories.includes(qDraft.category)) {
     await saveCategoriesToDb([...state.categories, qDraft.category]);
   }
-  (qDraft.children || []).forEach((c, i) => {
-    if (!c.id || !c.id.trim()) c.id = qDraft.id + '.' + String.fromCharCode(97 + i);
+
+  // Auto-generate any blank sub-question codes, picking a letter that
+  // isn't already in use by a sibling under this same question.
+  const usedLetters = new Set();
+  (qDraft.children || []).forEach(c => {
+    if (c.id && c.id.trim()) {
+      const m = c.id.trim().match(/\.([a-z])$/i);
+      if (m) usedLetters.add(m[1].toLowerCase());
+    }
   });
+  let nextCharCode = 97;
+  (qDraft.children || []).forEach(c => {
+    if (!c.id || !c.id.trim()) {
+      while (usedLetters.has(String.fromCharCode(nextCharCode))) nextCharCode++;
+      const letter = String.fromCharCode(nextCharCode);
+      usedLetters.add(letter);
+      c.id = qDraft.id + '.' + letter;
+    }
+  });
+
+  // Hard guarantee: no code on this question (its own, or any
+  // sub-question's) may duplicate a code used anywhere else in the
+  // entire library — this is what actually prevents the cross-talk
+  // bug, not just the auto-generator being smarter.
+  const originalId = isNewQuestion ? null : state.editingQuestion.id;
+  const codesElsewhere = new Set();
+  state.questions.forEach(q => {
+    if (q.id === originalId) return; // this question's own prior codes don't count as "taken"
+    codesElsewhere.add(q.id);
+    (q.children || []).forEach(c => codesElsewhere.add(c.id));
+  });
+  const ownCodes = [qDraft.id, ...(qDraft.children || []).map(c => c.id)];
+  const seenOwn = new Set();
+  for (const code of ownCodes) {
+    if (seenOwn.has(code)) {
+      alert('Two sub-questions here have the same code ("' + code + '"). Give each one a unique code.');
+      return null;
+    }
+    seenOwn.add(code);
+    if (codesElsewhere.has(code)) {
+      alert('The code "' + code + '" is already used by a different question in your library. Codes must be unique across the whole question bank — pick a different one.');
+      return null;
+    }
+  }
+
   await saveQuestionToDb(qDraft);
   const savedCopy = JSON.parse(JSON.stringify(qDraft));
   const existingIdx = state.questions.findIndex(q => q.id === savedCopy.id);
@@ -3034,6 +3073,7 @@ async function handleClickAction(t, e) {
         ? tpl.sections
         : [{ id: 'legacy', name: null, questionIds: tpl.questionIds || [] }];
     const seenTopLevelIds = new Set();
+    const seenCodes = new Set();
     sectionList.forEach(section => {
       section.questionIds.forEach(qid => {
         if (seenTopLevelIds.has(qid)) return; // guard against a question ending up in the template twice
@@ -3041,6 +3081,11 @@ async function handleClickAction(t, e) {
         const q = state.questions.find(x => x.id === qid);
         if (!q) return;
         flattenAnswerable(q).forEach(item => {
+          if (seenCodes.has(item.code)) {
+            console.error('Skipped a duplicate question code — two sub-questions share the same code:', item.code, item.text);
+            return;
+          }
+          seenCodes.add(item.code);
           responses.push({
             code: item.code, text: item.text, guidance: item.guidance, links: item.links || [], photos: item.photos || [],
             options: item.options, severity: item.severity, category: item.category,
